@@ -1,3 +1,5 @@
+import { onAuthChange } from './src/lib/auth';
+import AuthScreen from './src/screens/AuthScreen';
 import 'react-native-gesture-handler';
 import React, { useState, useEffect } from 'react';
 import { View, Text, ActivityIndicator, StatusBar as RNStatusBar } from 'react-native';
@@ -59,6 +61,8 @@ function AppInner() {
   const [toast, setToast] = useState(null);
   const [logModal, setLogModal] = useState({ visible: false, contact: null });
   const [locked, setLocked] = useState(false);
+  const [user, setUser] = useState(null);
+  const [authChecked, setAuthChecked] = useState(false);
 
   // PIN gating on launch
   useEffect(() => {
@@ -66,6 +70,14 @@ function AppInner() {
       setLocked(true);
     }
   }, [store.loaded, store.pin]);
+  // Auth state on launch + listen for changes
+  useEffect(() => {
+    const subscription = onAuthChange((u) => {
+      setUser(u);
+      setAuthChecked(true);
+    });
+    return () => subscription?.unsubscribe();
+  }, []);
 
   function showToast(msg, color) {
     setToast({ msg, color });
@@ -189,6 +201,18 @@ function AppInner() {
         <ActivityIndicator color={theme.ac} size="large" />
       </View>
     );
+  }
+
+  // Auth gate: must sign in before anything else
+  if (!authChecked) {
+    return (
+      <View style={{ flex: 1, backgroundColor: theme.bg, justifyContent: 'center', alignItems: 'center' }}>
+        <ActivityIndicator color={theme.t1} />
+      </View>
+    );
+  }
+  if (!user) {
+    return <AuthScreen onAuthed={(u) => setUser(u)} />;
   }
   if (!store.onboarded) {
     return (
