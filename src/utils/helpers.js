@@ -14,15 +14,18 @@ export const nextDate = (lc, f) => {
   return o && o.d ? addDays(lc, o.d) : null;
 };
 
-export const daysSince = (iso) =>
-  iso ? Math.floor((Date.now() - new Date(iso + 'T12:00:00').getTime()) / 864e5) : null;
+export const daysSince = (iso) => {
+  if (!iso) return null;
+  const d = Math.floor((Date.now() - new Date(iso.slice(0, 10) + 'T12:00:00').getTime()) / 864e5);
+  return d < 0 ? 0 : d;
+};
 
 export const daysUntil = (iso) =>
-  iso ? Math.floor((new Date(iso + 'T12:00:00').getTime() - Date.now()) / 864e5) : null;
+  iso ? Math.floor((new Date(iso.slice(0, 10) + 'T12:00:00').getTime() - Date.now()) / 864e5) : null;
 
 export const fmtDate = (iso) =>
   iso
-    ? new Date(iso + 'T12:00:00').toLocaleDateString('en-US', {
+    ? new Date(iso.slice(0, 10) + 'T12:00:00').toLocaleDateString('en-US', {
         month: 'short',
         day: 'numeric',
         year: 'numeric',
@@ -31,7 +34,7 @@ export const fmtDate = (iso) =>
 
 export const fmtShort = (iso) =>
   iso
-    ? new Date(iso + 'T12:00:00').toLocaleDateString('en-US', {
+    ? new Date(iso.slice(0, 10) + 'T12:00:00').toLocaleDateString('en-US', {
         month: 'short',
         day: 'numeric',
       })

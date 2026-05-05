@@ -22,8 +22,8 @@ export const CUSTOM_TAG_COLORS = [
 ];
 
 export const AV_COLORS = [
-  '#0077B6', '#00C9A7', '#6B7FBA', '#E060A0',
-  '#F4A261', '#48B8E0', '#2196A8', '#7B5EEA',
+  '#2D5A8A', '#3D6A9A', '#4A6FA0', '#345C8E',
+  '#3F6792', '#487098', '#3A6088', '#4D75A0',
 ];
 
 export const FREQ = [

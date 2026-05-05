@@ -1,9 +1,12 @@
 import { useState, useEffect, useCallback } from 'react';
 import { storage } from '../utils/storage';
+import { supabase } from '../lib/supabase';
+import { fetchContacts, syncContacts } from '../lib/contactsApi';
 import { isoToday, addDays, nextDate, daysUntil } from '../utils/helpers';
 import { EMPTY_CONTACT, getSampleContacts, DEFAULT_TAGS, DEFAULT_INTERESTS } from '../constants';
 
 export function useAppStore() {
+  const [userId, setUserId] = useState(null);
   const [contacts, setContacts] = useState([]);
   const [myCard, setMyCard] = useState({ ...EMPTY_CONTACT });
   const [customTags, setCustomTags] = useState([]);
@@ -18,19 +21,45 @@ export function useAppStore() {
   const [loaded, setLoaded] = useState(false);
   const [saving, setSaving] = useState(false);
 
-  // Load all data on mount
+  // Track the logged-in user
+  useEffect(() => {
+    let mounted = true;
+    (async () => {
+      const { data: { session } } = await supabase.auth.getSession();
+      if (mounted) setUserId(session?.user?.id || null);
+    })();
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      setUserId(session?.user?.id || null);
+    });
+    return () => {
+      mounted = false;
+      subscription.unsubscribe();
+    };
+  }, []);
+
+  // Load contacts from Supabase whenever the user changes
+  useEffect(() => {
+    if (!userId) {
+      setContacts([]);
+      return;
+    }
+    (async () => {
+      const cloud = await fetchContacts();
+      if (cloud.length > 0) {
+        setContacts(cloud);
+      } else {
+        // First time this user has signed in: seed with sample contacts
+        const samples = getSampleContacts(addDays, isoToday);
+        setContacts(samples);
+        const result = await syncContacts(samples, userId);
+        if (result.ok) setContacts(result.contacts);
+      }
+    })();
+  }, [userId]);
+
+  // Load all the on-device settings on mount (these stay local for now)
   useEffect(() => {
     (async () => {
-      let loaded_contacts = null;
-      try {
-        const r = await storage.get('crm-contacts');
-        if (r?.value) {
-          const parsed = JSON.parse(r.value);
-          if (Array.isArray(parsed) && parsed.length > 0) loaded_contacts = parsed;
-        }
-      } catch (_) {}
-      setContacts(loaded_contacts || getSampleContacts(addDays, isoToday));
-
       try {
         const r = await storage.get('crm-onboarded');
         setOnboarded(r?.value === 'true');
@@ -77,13 +106,22 @@ export function useAppStore() {
     })();
   }, []);
 
-  const persistContacts = useCallback(async (d) => {
-    setSaving(true);
-    try {
-      await storage.set('crm-contacts', JSON.stringify(d));
-    } catch (_) {}
-    setSaving(false);
-  }, []);
+  const persistContacts = useCallback(
+    async (d) => {
+      if (!userId) return;
+      setSaving(true);
+      try {
+        const result = await syncContacts(d, userId);
+        if (result.ok && result.contacts) {
+          setContacts(result.contacts);
+        }
+      } catch (e) {
+        console.error('persistContacts error:', e);
+      }
+      setSaving(false);
+    },
+    [userId],
+  );
 
   const commit = useCallback(
     (d) => {

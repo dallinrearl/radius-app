@@ -104,7 +104,7 @@ export default function ContactsScreen({
           >
             Contacts
           </Text>
-          <Text style={{ fontSize: 11, color: theme.t5, marginTop: 2 }}>
+          <Text style={{ fontSize: 11, color: theme.gold, marginTop: 2, letterSpacing: 0.3 }}>
             {contacts.length} contact{contacts.length !== 1 ? 's' : ''}
           </Text>
         </View>
@@ -116,7 +116,7 @@ export default function ContactsScreen({
               height: 36,
               borderRadius: 10,
               borderWidth: 1,
-              backgroundColor: showInbox ? '#00C9A718' : theme.bg2,
+              backgroundColor: showInbox ? theme.bgAc : theme.bg2,
               borderColor: showInbox ? theme.ac : theme.brd2,
               alignItems: 'center',
               justifyContent: 'center',
@@ -226,7 +226,7 @@ export default function ContactsScreen({
               height: 42,
               borderRadius: 12,
               borderWidth: 1,
-              backgroundColor: filterOpen ? '#00C9A718' : theme.bg2,
+              backgroundColor: filterOpen ? theme.bgAc : theme.bg2,
               borderColor: filterOpen ? theme.ac : theme.brd2,
               alignItems: 'center',
               justifyContent: 'center',

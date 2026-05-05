@@ -90,7 +90,7 @@ export default function DetailScreen({
     showToast('Logged contact with ' + contact.name);
   }
 
-  const QBtn = ({ label, onPress }) => (
+  const QBtn = ({ label, onPress, gold }) => (
     <TouchableOpacity
       onPress={onPress}
       activeOpacity={0.7}
@@ -99,11 +99,11 @@ export default function DetailScreen({
         paddingVertical: 8,
         borderRadius: 12,
         borderWidth: 1,
-        borderColor: theme.brdAc,
-        backgroundColor: theme.bgAc,
+        borderColor: gold ? theme.gold : theme.brdAc,
+        backgroundColor: gold ? theme.bgGold : theme.bgAc,
       }}
     >
-      <Text style={{ color: theme.ac, fontSize: 12, fontWeight: '600' }}>{label}</Text>
+      <Text style={{ color: gold ? theme.gold : theme.ac, fontSize: 12, fontWeight: '600' }}>{label}</Text>
     </TouchableOpacity>
   );
 
@@ -116,7 +116,26 @@ export default function DetailScreen({
           paddingBottom: 100,
         }}
       >
-        <BackButton onPress={onBack} />
+        <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+          <BackButton onPress={onBack} />
+          <TouchableOpacity
+            onPress={onEdit}
+            activeOpacity={0.7}
+            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+            style={{
+              width: 40,
+              height: 40,
+              borderRadius: 20,
+              backgroundColor: theme.bgAc,
+              borderWidth: 1,
+              borderColor: theme.brdAc,
+              alignItems: 'center',
+              justifyContent: 'center',
+            }}
+          >
+            <Text style={{ fontSize: 16, color: theme.ac }}>✎</Text>
+          </TouchableOpacity>
+        </View>
 
         {/* Header */}
         <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: 16, marginBottom: 20 }}>
@@ -185,8 +204,7 @@ export default function DetailScreen({
 
         {/* Quick Actions */}
         <View style={{ flexDirection: 'row', gap: 6, marginBottom: 18, flexWrap: 'wrap' }}>
-          <QBtn label="Log Today" onPress={logToday} />
-          <QBtn label="Edit" onPress={onEdit} />
+          <QBtn label="Log Today" onPress={logToday} gold />
           {contact.phone ? (
             <QBtn label="Call" onPress={() => Linking.openURL('tel:' + contact.phone)} />
           ) : null}
@@ -243,17 +261,16 @@ export default function DetailScreen({
           )}
           {contact.howMet ? <DRow label="How We Met" value={contact.howMet} /> : null}
           {contact.howHelp ? <DRow label="How I Can Help" value={contact.howHelp} /> : null}
-          {contact.lastContacted ? (
-            <DRow
-              label="Last Contacted"
-              value={
-                fmtDate(contact.lastContacted) +
-                ' (' +
-                daysSince(contact.lastContacted) +
-                'd ago)'
-              }
-            />
-          ) : null}
+          {contact.lastContacted ? (() => {
+            const d = daysSince(contact.lastContacted);
+            const suffix = d <= 0 ? 'today' : d === 1 ? 'yesterday' : d + 'd ago';
+            return (
+              <DRow
+                label="Last Contacted"
+                value={fmtDate(contact.lastContacted) + ' (' + suffix + ')'}
+              />
+            );
+          })() : null}
           {contact.birthday ? <DRow label="Birthday" value={fmtDate(contact.birthday)} /> : null}
           {contact.location ? <DRow label="Location" value={contact.location} /> : null}
           {contact.timezone ? <DRow label="Timezone" value={contact.timezone} /> : null}
@@ -322,7 +339,7 @@ export default function DetailScreen({
               style={{
                 fontSize: 10,
                 fontWeight: '700',
-                color: theme.info,
+                color: theme.t4,
                 letterSpacing: 0.6,
                 textTransform: 'uppercase',
                 marginBottom: 12,
@@ -359,7 +376,7 @@ export default function DetailScreen({
               style={{
                 fontSize: 10,
                 fontWeight: '700',
-                color: theme.purp,
+                color: theme.t4,
                 letterSpacing: 0.6,
                 textTransform: 'uppercase',
                 marginBottom: 12,
@@ -427,7 +444,7 @@ export default function DetailScreen({
             style={{
               fontSize: 10,
               fontWeight: '700',
-              color: theme.ac,
+              color: theme.t4,
               letterSpacing: 0.6,
               textTransform: 'uppercase',
               marginBottom: 12,
@@ -617,20 +634,8 @@ function AIPanel({ contact }) {
     <View style={{ marginBottom: 14, gap: 8 }}>
       <View style={{ flexDirection: 'row', gap: 6 }}>
         <Btn label="Brief" type="brief" color={theme.ac} bgColor={theme.bgAc} brdColor={theme.brdAc} />
-        <Btn
-          label="Meeting Prep"
-          type="prep"
-          color={theme.purp2}
-          bgColor={theme.bg5}
-          brdColor={theme.brdPurp}
-        />
-        <Btn
-          label="Background"
-          type="background"
-          color={theme.warn}
-          bgColor={theme.bgWarn}
-          brdColor={theme.brdWarn}
-        />
+        <Btn label="Meeting Prep" type="prep" color={theme.ac} bgColor={theme.bgAc} brdColor={theme.brdAc} />
+        <Btn label="Background" type="background" color={theme.ac} bgColor={theme.bgAc} brdColor={theme.brdAc} />
       </View>
       {(loading || result) && (
         <View
