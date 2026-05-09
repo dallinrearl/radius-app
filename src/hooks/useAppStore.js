@@ -2,7 +2,17 @@ import { useState, useEffect, useCallback } from 'react';
 import { storage } from '../utils/storage';
 import { supabase } from '../lib/supabase';
 import { fetchContacts, syncContacts } from '../lib/contactsApi';
+import { fetchProfile, updateProfile, incrementAiCounter, resetAiCounter } from '../lib/profileApi';
 import { isoToday, addDays, nextDate, daysUntil } from '../utils/helpers';
+import {
+  TIERS,
+  canMakeAiCall,
+  aiCallsRemaining,
+  isFeatureUnlocked,
+  shouldResetAiCounter,
+  isTrialActive,
+  trialDaysRemaining,
+} from '../utils/tierLimits';
 import {
   EMPTY_CONTACT,
   getSampleContacts,
@@ -62,6 +72,15 @@ export function useAppStore() {
   const [contactsFetchError, setContactsFetchError] = useState(null);
   const [contactsFetching, setContactsFetching] = useState(false);
 
+  // ---------- Tier / subscription state ----------
+  // Profile holds the user's tier, AI usage counter, trial state, Stripe IDs.
+  // Loaded from Supabase on auth, refreshed after upgrades / counter changes.
+  const [profile, setProfile] = useState(null);
+  const [profileLoading, setProfileLoading] = useState(false);
+  // Modal state — when AI cap is hit, this gets set to a reason string.
+  // Components read it to render the upgrade modal.
+  const [paywallReason, setPaywallReason] = useState(null);
+
   useEffect(() => {
     let mounted = true;
     (async () => {
@@ -99,6 +118,39 @@ export function useAppStore() {
     }
     refetchContacts();
   }, [userId, refetchContacts]);
+
+  // ---------- Profile / tier loading ----------
+  // Loads profile when userId changes. Also resets the AI counter if the
+  // last reset was in a previous calendar month.
+  const refetchProfile = useCallback(async () => {
+    if (!userId) {
+      setProfile(null);
+      return;
+    }
+    setProfileLoading(true);
+    try {
+      let p = await fetchProfile();
+      if (p && shouldResetAiCounter(p.ai_calls_reset_at)) {
+        // Auto-reset on month rollover. Background, fire-and-forget on error.
+        try {
+          p = await resetAiCounter();
+        } catch (e) {
+          console.warn('AI counter reset failed:', e?.message);
+        }
+      }
+      setProfile(p);
+    } catch (e) {
+      console.warn('refetchProfile error:', e?.message);
+      // Don't block app on profile load failure. Default to a free-tier
+      // assumption locally (set below in the derived helpers).
+      setProfile(null);
+    }
+    setProfileLoading(false);
+  }, [userId]);
+
+  useEffect(() => {
+    refetchProfile();
+  }, [userId, refetchProfile]);
 
   useEffect(() => {
     (async () => {
@@ -509,6 +561,62 @@ export function useAppStore() {
     return nd && daysUntil(nd) < 0;
   }).length;
 
+  // ---------- Tier derived state ----------
+  // Defaults to 'free' if profile hasn't loaded yet — fail closed, not open.
+  // This means the AI counter is conservative during first-load: better to
+  // briefly show "5 of 5 used" than to let a free user run unlimited calls
+  // because we couldn't fetch their profile.
+  const tier = profile?.tier || TIERS.FREE;
+  const aiCallsCount = profile?.ai_calls_count || 0;
+  const trialExpiresAt = profile?.trial_expires_at || null;
+  const trialActive = isTrialActive(tier, trialExpiresAt);
+  const trialDaysLeft = trialDaysRemaining(tier, trialExpiresAt);
+  // Effective tier for feature gating: trial behaves like pro until it expires.
+  const effectiveTier = trialActive ? TIERS.TRIAL : tier;
+  const aiRemaining = aiCallsRemaining(effectiveTier, aiCallsCount);
+  const canUseAi = canMakeAiCall(effectiveTier, aiCallsCount);
+
+  // Helper exposed to components: check a feature by key.
+  // e.g. featureUnlocked('granolaAiProcessing') -> false on free, true on pro
+  function featureUnlocked(key) {
+    return isFeatureUnlocked(effectiveTier, key);
+  }
+
+  // ---------- AI usage actions ----------
+  // Wrapper for AI calls. Components call this BEFORE invoking the AI;
+  // returns true if the call is allowed (and increments the counter as a
+  // side effect for free users), false if blocked.
+  // If blocked, sets paywallReason so the upgrade modal renders.
+  const consumeAiCall = useCallback(
+    async (reason = 'ai_limit_reached') => {
+      if (!canMakeAiCall(effectiveTier, aiCallsCount)) {
+        setPaywallReason(reason);
+        return false;
+      }
+      // Pro / trial: unlimited, no counter increment needed.
+      if (effectiveTier !== TIERS.FREE) return true;
+      // Free: increment counter. Update local state optimistically, then
+      // persist. If persist fails, log but allow the call (Optimistic UX).
+      try {
+        const updated = await incrementAiCounter();
+        setProfile(updated);
+      } catch (e) {
+        console.warn('AI counter increment failed:', e?.message);
+        // Optimistic local fallback so the UI still updates
+        setProfile((p) => (p ? { ...p, ai_calls_count: (p.ai_calls_count || 0) + 1 } : p));
+      }
+      return true;
+    },
+    [effectiveTier, aiCallsCount],
+  );
+
+  const dismissPaywall = useCallback(() => setPaywallReason(null), []);
+
+  // Trigger paywall manually (e.g. user tapped a locked Pro feature button).
+  const showPaywall = useCallback((reason = 'pro_feature') => {
+    setPaywallReason(reason);
+  }, []);
+
   return {
     contacts,
     activeContacts,
@@ -538,6 +646,22 @@ export function useAppStore() {
     contactsFetchError,
     contactsFetching,
     refetchContacts,
+    // ---------- Tier / subscription ----------
+    profile,
+    profileLoading,
+    refetchProfile,
+    tier,
+    effectiveTier,
+    aiCallsCount,
+    aiRemaining,
+    canUseAi,
+    trialActive,
+    trialDaysLeft,
+    featureUnlocked,
+    consumeAiCall,
+    paywallReason,
+    showPaywall,
+    dismissPaywall,
     commit,
     saveMyCard,
     saveCustomTags,

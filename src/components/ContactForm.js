@@ -20,7 +20,16 @@ import {
   emptyEmail,
   emptyAddress,
 } from '../constants';
-import { fmtPhone, fmtDate, nextDate, daysUntil, makeVcf } from '../utils/helpers';
+import {
+  fmtPhone,
+  fmtDate,
+  nextDate,
+  daysUntil,
+  makeVcf,
+  parseLegacyDate,
+  dateObjectIsEmpty,
+  isoToday,
+} from '../utils/helpers';
 import {
   Section,
   Field,
@@ -32,6 +41,7 @@ import {
 import { TagSelector, InterestSelector } from './Selectors';
 import { CityInput, CompanyInput } from './Typeahead';
 import { DownloadIcon, XIcon } from './Icons';
+import DateInput from './DateInput';
 import * as FileSystem from 'expo-file-system';
 import * as Sharing from 'expo-sharing';
 
@@ -109,6 +119,17 @@ export default function ContactForm({
 
       if (!Array.isArray(next.mailingLists)) {
         next.mailingLists = [];
+        changed = true;
+      }
+
+      // Migrate legacy birthday/anniversary strings to date objects.
+      // Leaves objects untouched. Empty strings become null.
+      if (typeof next.birthday === 'string') {
+        next.birthday = parseLegacyDate(next.birthday);
+        changed = true;
+      }
+      if (typeof next.anniversary === 'string') {
+        next.anniversary = parseLegacyDate(next.anniversary);
         changed = true;
       }
 
@@ -633,10 +654,9 @@ export default function ContactForm({
             </View>
           </Field>
           <Field label="Birthday">
-            <StyledInput
-              value={form.birthday || ''}
-              onChangeText={(v) => setForm((f) => ({ ...f, birthday: v }))}
-              placeholder="YYYY-MM-DD or MM-DD"
+            <DateInput
+              value={form.birthday}
+              onChange={(v) => setForm((f) => ({ ...f, birthday: dateObjectIsEmpty(v) ? null : v }))}
             />
           </Field>
           <Field label="Marital Status">
@@ -684,90 +704,45 @@ export default function ContactForm({
                 />
               </Field>
               <Field label="Anniversary">
-                <StyledInput
-                  value={form.anniversary || ''}
-                  onChangeText={(v) => setForm((f) => ({ ...f, anniversary: v }))}
-                  placeholder="YYYY-MM-DD or MM-DD"
+                <DateInput
+                  value={form.anniversary}
+                  onChange={(v) => setForm((f) => ({ ...f, anniversary: dateObjectIsEmpty(v) ? null : v }))}
                 />
               </Field>
             </>
           )}
           <Field label="Kids">
             {(form.kids || []).map((k, i) => (
-              <View key={i} style={{ marginBottom: 10 }}>
-                <View style={{ flexDirection: 'row', gap: 8, alignItems: 'center' }}>
-                  <TouchableOpacity
-                    onPress={() => {
-                      const ks = [...form.kids];
-                      ks[i] = { ...k, gender: k.gender === 'girl' ? 'boy' : 'girl' };
-                      setForm((f) => ({ ...f, kids: ks }));
-                    }}
-                    style={{
-                      paddingHorizontal: 10,
-                      paddingVertical: 8,
-                      borderRadius: 8,
-                      borderWidth: 1,
-                      borderColor: theme.brd2,
-                      backgroundColor: k.gender === 'girl' ? '#E060A018' : theme.bg2,
-                    }}
-                  >
-                    <Text
-                      style={{
-                        fontSize: 11,
-                        fontWeight: '600',
-                        color: k.gender === 'girl' ? theme.pink : theme.t5,
-                      }}
-                    >
-                      {k.gender === 'girl' ? 'Girl' : 'Boy'}
-                    </Text>
-                  </TouchableOpacity>
-                  <StyledInput
-                    placeholder="Name"
-                    value={k.name}
-                    onChangeText={(v) => {
-                      const ks = [...form.kids];
-                      ks[i] = { ...k, name: v };
-                      setForm((f) => ({ ...f, kids: ks }));
-                    }}
-                    style={{ flex: 1 }}
-                  />
-                  <StyledInput
-                    placeholder="Age"
-                    value={k.age}
-                    onChangeText={(v) => {
-                      const ks = [...form.kids];
-                      ks[i] = { ...k, age: v };
-                      setForm((f) => ({ ...f, kids: ks }));
-                    }}
-                    style={{ width: 70 }}
-                    keyboardType="numeric"
-                  />
-                  <TouchableOpacity
-                    onPress={() =>
-                      setForm((f) => ({ ...f, kids: f.kids.filter((_, j) => j !== i) }))
-                    }
-                  >
-                    <XIcon size={18} color={theme.red} />
-                  </TouchableOpacity>
-                </View>
-                <StyledInput
-                  placeholder="Notes about this child (optional)..."
-                  value={k.notes || ''}
-                  onChangeText={(v) => {
-                    const ks = [...form.kids];
-                    ks[i] = { ...k, notes: v };
-                    setForm((f) => ({ ...f, kids: ks }));
-                  }}
-                  multiline
-                  style={{ marginTop: 6, minHeight: 40 }}
-                />
-              </View>
+              <KidRow
+                key={i}
+                kid={k}
+                theme={theme}
+                onChange={(next) => {
+                  const ks = [...form.kids];
+                  ks[i] = next;
+                  setForm((f) => ({ ...f, kids: ks }));
+                }}
+                onRemove={() =>
+                  setForm((f) => ({ ...f, kids: f.kids.filter((_, j) => j !== i) }))
+                }
+              />
             ))}
             <TouchableOpacity
               onPress={() =>
                 setForm((f) => ({
                   ...f,
-                  kids: [...(f.kids || []), { name: '', age: '', gender: 'boy', notes: '' }],
+                  kids: [
+                    ...(f.kids || []),
+                    {
+                      name: '',
+                      gender: 'boy',
+                      notes: '',
+                      birthday: null,
+                      ageAsOf: null,
+                      ageMode: 'age',
+                      age: '',
+                    },
+                  ],
                 }))
               }
               style={{
@@ -902,7 +877,163 @@ export default function ContactForm({
   );
 }
 
-// =================== Sub-components ===================
+// =================== KidRow component ===================
+//
+// Each kid has gender, name, notes, plus an age input that toggles between
+// two modes: "age" (a single number, with auto-increment over time via
+// ageAsOf storage) and "birthday" (a three-box DateInput).
+//
+// When in "age" mode and the user types a number, we save:
+//   { age: '<typed string for display>', ageAsOf: { age: <number>, asOf: today } }
+// When in "birthday" mode, we save the date object.
+
+function KidRow({ kid, theme, onChange, onRemove }) {
+  // Migrate legacy kid shape on render. If `kid.ageMode` is missing,
+  // infer from existing data: birthday wins if present, else 'age'.
+  const k = kid || {};
+  const hasBirthday =
+    k.birthday && (typeof k.birthday === 'object' ? !dateObjectIsEmpty(k.birthday) : !!k.birthday);
+  const ageMode = k.ageMode || (hasBirthday ? 'birthday' : 'age');
+
+  function setMode(mode) {
+    onChange({ ...k, ageMode: mode });
+  }
+
+  function setAgeStr(v) {
+    // Persist the raw string for display, plus an ageAsOf record for the
+    // auto-increment math. Strip non-numeric (allow . for half-years).
+    const cleaned = (v || '').replace(/[^0-9.]/g, '');
+    const num = parseFloat(cleaned);
+    const asOfRecord =
+      Number.isFinite(num) && cleaned !== ''
+        ? { age: num, asOf: isoToday() }
+        : null;
+    onChange({ ...k, age: cleaned, ageAsOf: asOfRecord });
+  }
+
+  function setBirthday(next) {
+    const empty = dateObjectIsEmpty(next);
+    onChange({ ...k, birthday: empty ? null : next });
+  }
+
+  return (
+    <View
+      style={{
+        marginBottom: 12,
+        padding: 10,
+        borderRadius: 12,
+        borderWidth: 1,
+        borderColor: theme.brd2,
+        backgroundColor: theme.bg2,
+      }}
+    >
+      {/* Top row: gender, name, remove */}
+      <View style={{ flexDirection: 'row', gap: 8, alignItems: 'center' }}>
+        <TouchableOpacity
+          onPress={() => onChange({ ...k, gender: k.gender === 'girl' ? 'boy' : 'girl' })}
+          style={{
+            paddingHorizontal: 10,
+            paddingVertical: 8,
+            borderRadius: 8,
+            borderWidth: 1,
+            borderColor: theme.brd2,
+            backgroundColor: k.gender === 'girl' ? '#E060A018' : theme.bg3,
+          }}
+        >
+          <Text
+            style={{
+              fontSize: 11,
+              fontWeight: '600',
+              color: k.gender === 'girl' ? theme.pink : theme.t5,
+            }}
+          >
+            {k.gender === 'girl' ? 'Girl' : 'Boy'}
+          </Text>
+        </TouchableOpacity>
+        <StyledInput
+          placeholder="Name"
+          value={k.name || ''}
+          onChangeText={(v) => onChange({ ...k, name: v })}
+          style={{ flex: 1 }}
+        />
+        <TouchableOpacity onPress={onRemove}>
+          <XIcon size={18} color={theme.red} />
+        </TouchableOpacity>
+      </View>
+
+      {/* Age / Birthday toggle */}
+      <View style={{ flexDirection: 'row', gap: 6, marginTop: 10, marginBottom: 8 }}>
+        <ModeBtn
+          theme={theme}
+          on={ageMode === 'age'}
+          label="Age"
+          onPress={() => setMode('age')}
+        />
+        <ModeBtn
+          theme={theme}
+          on={ageMode === 'birthday'}
+          label="Birthday"
+          onPress={() => setMode('birthday')}
+        />
+      </View>
+
+      {/* Mode-specific input */}
+      {ageMode === 'age' ? (
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+          <StyledInput
+            placeholder="e.g. 2.5"
+            value={k.age || ''}
+            onChangeText={setAgeStr}
+            style={{ width: 100 }}
+            keyboardType="decimal-pad"
+          />
+          <Text style={{ fontSize: 11, color: theme.t6, flex: 1 }}>
+            Auto-increments over time
+          </Text>
+        </View>
+      ) : (
+        <DateInput value={k.birthday} onChange={setBirthday} compact />
+      )}
+
+      {/* Notes */}
+      <StyledInput
+        placeholder="Notes about this child (optional)..."
+        value={k.notes || ''}
+        onChangeText={(v) => onChange({ ...k, notes: v })}
+        multiline
+        style={{ marginTop: 8, minHeight: 40 }}
+      />
+    </View>
+  );
+}
+
+function ModeBtn({ theme, on, label, onPress }) {
+  return (
+    <TouchableOpacity
+      onPress={onPress}
+      style={{
+        paddingHorizontal: 12,
+        paddingVertical: 6,
+        borderRadius: 8,
+        borderWidth: 1,
+        backgroundColor: on ? theme.bgAc : theme.bg3,
+        borderColor: on ? theme.ac : theme.brd2,
+      }}
+    >
+      <Text
+        style={{
+          fontSize: 11,
+          fontWeight: '600',
+          color: on ? theme.ac : theme.t5,
+        }}
+      >
+        {label}
+      </Text>
+    </TouchableOpacity>
+  );
+}
+
+// =================== Existing sub-components ===================
 
 function LabelPicker({ theme, value, presets, onChange }) {
   const isPresetMatch = presets.includes(value);

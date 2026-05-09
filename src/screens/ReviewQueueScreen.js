@@ -40,6 +40,8 @@ export default function ReviewQueueScreen({
   onCreateContactFromAttendee,
   onBack,
   showToast,
+  granolaAiUnlocked,
+  onShowPaywall,
 }) {
   const { theme } = useTheme();
   const insets = useSafeAreaInsets();
@@ -152,6 +154,11 @@ export default function ReviewQueueScreen({
 
   async function fetchAiSuggestions(item) {
     if (!item || !onPatchReviewQueueItem) return;
+    // Tier gate: free users see the paywall instead of running the call.
+    if (!granolaAiUnlocked) {
+      onShowPaywall && onShowPaywall('granola_ai_processing');
+      return;
+    }
     setAiBusyItemId(item.id);
     try {
       // Send a transcript snippet rather than the full text to keep cost/tokens low.
@@ -187,6 +194,11 @@ export default function ReviewQueueScreen({
   async function fetchMeetingSummary(group) {
     if (!group?.noteId || !onPatchReviewQueueItem) return;
     if (summaryBusyNoteId === group.noteId) return;
+    // Tier gate
+    if (!granolaAiUnlocked) {
+      onShowPaywall && onShowPaywall('granola_ai_processing');
+      return;
+    }
 
     // Pick a representative item to source rawText from
     const sourceItem = group.items.find((it) => it.rawText || it.rawTranscript);
@@ -196,7 +208,10 @@ export default function ReviewQueueScreen({
 
     setSummaryBusyNoteId(group.noteId);
     try {
-      const summary = await aiSummarizeMeetingForReview(text);
+      const summary = await aiSummarizeMeetingForReview(text, {
+        name: myCard?.name || '',
+        company: myCard?.company || '',
+      });
       // Patch every item in this meeting with the summary
       for (const it of group.items) {
         await onPatchReviewQueueItem(it.id, { meetingSummary: summary });
@@ -266,6 +281,7 @@ export default function ReviewQueueScreen({
               transcriptOpen={transcriptOpenNoteIds.has(group.noteId)}
               theme={theme}
               getContactById={getContactById}
+              granolaAiUnlocked={granolaAiUnlocked}
               onConfirm={(item, contact) => applyContactToItem(item, contact)}
               onPickDifferent={(item) => setPickerOpen({ item, scope: 'all' })}
               onPickSameFirstName={(item) => setPickerOpen({ item, scope: 'firstName' })}
@@ -325,6 +341,7 @@ function MeetingGroup({
   transcriptOpen,
   theme,
   getContactById,
+  granolaAiUnlocked,
   onConfirm,
   onPickDifferent,
   onPickSameFirstName,
@@ -381,6 +398,7 @@ function MeetingGroup({
         transcriptText={transcriptText}
         transcriptOpen={transcriptOpen}
         summaryBusy={summaryBusy}
+        granolaAiUnlocked={granolaAiUnlocked}
         onFetchSummary={() => onFetchMeetingSummary(group)}
         onToggleTranscript={() => onToggleTranscript(group.noteId)}
       />
@@ -395,6 +413,7 @@ function MeetingGroup({
           aiBusy={aiBusyItemId === item.id}
           theme={theme}
           getContactById={getContactById}
+          granolaAiUnlocked={granolaAiUnlocked}
           onConfirm={onConfirm}
           onPickDifferent={onPickDifferent}
           onPickSameFirstName={onPickSameFirstName}
@@ -415,6 +434,7 @@ function MeetingContext({
   transcriptText,
   transcriptOpen,
   summaryBusy,
+  granolaAiUnlocked,
   onFetchSummary,
   onToggleTranscript,
 }) {
@@ -461,8 +481,8 @@ function MeetingContext({
               paddingVertical: 6,
               borderRadius: 8,
               borderWidth: 1,
-              borderColor: theme.purp + '60',
-              backgroundColor: theme.purp + '15',
+              borderColor: granolaAiUnlocked ? theme.purp + '60' : theme.brd2,
+              backgroundColor: granolaAiUnlocked ? theme.purp + '15' : theme.bg2,
               opacity: summaryBusy ? 0.5 : 1,
               flexDirection: 'row',
               alignItems: 'center',
@@ -472,9 +492,31 @@ function MeetingContext({
             {summaryBusy ? (
               <ActivityIndicator color={theme.purp} size="small" />
             ) : null}
-            <Text style={{ color: theme.purp, fontSize: 11, fontWeight: '600' }}>
+            {!granolaAiUnlocked ? (
+              <Text style={{ fontSize: 11, color: theme.t5 }}>🔒</Text>
+            ) : null}
+            <Text
+              style={{
+                color: granolaAiUnlocked ? theme.purp : theme.t5,
+                fontSize: 11,
+                fontWeight: '600',
+              }}
+            >
               {summaryBusy ? 'Summarizing...' : 'Get AI summary of meeting'}
             </Text>
+            {!granolaAiUnlocked ? (
+              <View
+                style={{
+                  paddingHorizontal: 6,
+                  paddingVertical: 2,
+                  borderRadius: 4,
+                  backgroundColor: theme.warn + '22',
+                  marginLeft: 2,
+                }}
+              >
+                <Text style={{ fontSize: 9, color: theme.warn, fontWeight: '700' }}>PRO</Text>
+              </View>
+            ) : null}
           </TouchableOpacity>
         </View>
       )}
@@ -536,6 +578,7 @@ function QueueItemRow({
   aiBusy,
   theme,
   getContactById,
+  granolaAiUnlocked,
   onConfirm,
   onPickDifferent,
   onPickSameFirstName,
@@ -688,7 +731,13 @@ function QueueItemRow({
                 {/* AI suggestion button: only show if we haven't fetched yet */}
                 {aiSuggestions === undefined ? (
                   <ActionBtn
-                    label={aiBusy ? 'Thinking...' : 'Get AI suggestions'}
+                    label={
+                      aiBusy
+                        ? 'Thinking...'
+                        : granolaAiUnlocked
+                          ? 'Get AI suggestions'
+                          : '🔒 Get AI suggestions (Pro)'
+                    }
                     theme={theme}
                     purple
                     disabled={aiBusy}

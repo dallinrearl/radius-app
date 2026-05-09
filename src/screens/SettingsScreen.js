@@ -75,6 +75,7 @@ export default function SettingsScreen({
   onRemoveFromReviewQueue,
   onClearReviewQueue,
   onOpenReviewQueue,
+  granolaAiUnlocked,
 }) {
   const { theme, themeName, toggleTheme } = useTheme();
   const insets = useSafeAreaInsets();
@@ -601,6 +602,7 @@ function GranolaIntegration({
         onProgress: (msg) => setSyncStatus(msg),
         onCommit,
         addToReviewQueue: onAddToReviewQueue,
+        granolaAiUnlocked: !!granolaAiUnlocked,
       });
 
       // Reflect the new last-sync timestamp in the UI

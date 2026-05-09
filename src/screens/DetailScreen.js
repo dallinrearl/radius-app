@@ -28,6 +28,9 @@ import {
   fmtDate,
   isoToday,
   makeVcf,
+  formatDateObject,
+  displayKidAge,
+  dateObjectIsEmpty,
 } from '../utils/helpers';
 import {
   FREQ,
@@ -52,6 +55,9 @@ export default function DetailScreen({
   showToast,
   mailingLists,
   onToggleContactOnList,
+  consumeAiCall,
+  aiRemaining,
+  effectiveTier,
 }) {
   const { theme } = useTheme();
   const insets = useSafeAreaInsets();
@@ -82,8 +88,8 @@ export default function DetailScreen({
     !!contact.married ||
     (Array.isArray(contact.kids) && contact.kids.length > 0) ||
     (Array.isArray(contact.interests) && contact.interests.length > 0) ||
-    !!contact.anniversary ||
-    !!contact.birthday;
+    (!!contact.anniversary && !dateObjectIsEmpty(contact.anniversary)) ||
+    (!!contact.birthday && !dateObjectIsEmpty(contact.birthday));
 
   const hasAddresses = addresses.length > 0;
 
@@ -269,7 +275,12 @@ export default function DetailScreen({
         >
           AI Insights
         </Text>
-        <AIPanel contact={contact} />
+        <AIPanel
+          contact={contact}
+          consumeAiCall={consumeAiCall}
+          aiRemaining={aiRemaining}
+          effectiveTier={effectiveTier}
+        />
 
         {/* Contact Methods */}
         {(phones.length > 0 || emails.length > 0 || contact.linkedin) && (
@@ -486,9 +497,9 @@ export default function DetailScreen({
                 Hometown: {contact.hometown}
               </Text>
             ) : null}
-            {contact.birthday ? (
+            {contact.birthday && !dateObjectIsEmpty(contact.birthday) ? (
               <Text style={{ fontSize: 13, color: theme.t3, marginBottom: 6 }}>
-                Birthday: {formatFlexibleDate(contact.birthday) || contact.birthday}
+                Birthday: {formatDateObject(contact.birthday)}
               </Text>
             ) : null}
             {contact.married ? (
@@ -499,28 +510,31 @@ export default function DetailScreen({
                 {contact.spouseName ? ' / ' + contact.spouseName : ''}
               </Text>
             ) : null}
-            {contact.anniversary && contact.married === 'married' ? (
+            {contact.anniversary && !dateObjectIsEmpty(contact.anniversary) && contact.married === 'married' ? (
               <Text style={{ fontSize: 13, color: theme.t3, marginBottom: 6 }}>
-                Anniversary: {formatFlexibleDate(contact.anniversary) || contact.anniversary}
+                Anniversary: {formatDateObject(contact.anniversary)}
               </Text>
             ) : null}
             {Array.isArray(contact.kids) && contact.kids.length > 0 ? (
               <View style={{ marginBottom: 8 }}>
                 <Text style={{ fontSize: 11, color: theme.t5, marginBottom: 4 }}>Kids:</Text>
-                {contact.kids.map((k, i) => (
-                  <View key={i} style={{ marginBottom: k.notes ? 6 : 2 }}>
-                    <Text style={{ fontSize: 13, color: theme.t3 }}>
-                      {k.gender === 'girl' ? '(F)' : '(M)'}
-                      {k.name ? ' ' + k.name : ''}
-                      {k.age ? ', ' + k.age : ''}
-                    </Text>
-                    {k.notes ? (
-                      <Text style={{ fontSize: 11, color: theme.t5, marginLeft: 24, marginTop: 1 }}>
-                        {k.notes}
+                {contact.kids.map((k, i) => {
+                  const kidAge = displayKidAge(k);
+                  return (
+                    <View key={i} style={{ marginBottom: k.notes ? 6 : 2 }}>
+                      <Text style={{ fontSize: 13, color: theme.t3 }}>
+                        {k.gender === 'girl' ? '(F)' : '(M)'}
+                        {k.name ? ' ' + k.name : ''}
+                        {kidAge ? ', ' + kidAge : ''}
                       </Text>
-                    ) : null}
-                  </View>
-                ))}
+                      {k.notes ? (
+                        <Text style={{ fontSize: 11, color: theme.t5, marginLeft: 24, marginTop: 1 }}>
+                          {k.notes}
+                        </Text>
+                      ) : null}
+                    </View>
+                  );
+                })}
               </View>
             ) : null}
             {Array.isArray(contact.interests) && contact.interests.length > 0 ? (
@@ -559,11 +573,21 @@ export default function DetailScreen({
           >
             Contact Log
           </Text>
-          <ConvLog contact={contact} onUpdate={onUpdate} showToast={showToast} />
+          <ConvLog
+            contact={contact}
+            onUpdate={onUpdate}
+            showToast={showToast}
+            consumeAiCall={consumeAiCall}
+          />
         </View>
 
         {/* Templates */}
-        <Templates contact={contact} />
+        <Templates
+          contact={contact}
+          consumeAiCall={consumeAiCall}
+          aiRemaining={aiRemaining}
+          effectiveTier={effectiveTier}
+        />
 
         {/* Export */}
         <TouchableOpacity
@@ -987,13 +1011,18 @@ function DetailBlock({ label, content }) {
   );
 }
 
-function AIPanel({ contact }) {
+function AIPanel({ contact, consumeAiCall, aiRemaining, effectiveTier }) {
   const { theme } = useTheme();
   const [mode, setMode] = useState(null);
   const [result, setResult] = useState('');
   const [loading, setLoading] = useState(false);
 
   async function run(type) {
+    // Gate behind tier — bails out and triggers paywall if free user is at cap.
+    if (consumeAiCall) {
+      const allowed = await consumeAiCall('ai_limit_reached');
+      if (!allowed) return;
+    }
     setMode(type);
     setResult('');
     setLoading(true);
@@ -1031,6 +1060,12 @@ function AIPanel({ contact }) {
         <Btn label="Meeting Prep" type="prep" color={theme.ac} bgColor={theme.bgAc} brdColor={theme.brdAc} />
         <Btn label="Background" type="background" color={theme.ac} bgColor={theme.bgAc} brdColor={theme.brdAc} />
       </View>
+      {/* AI counter, only shown to free users (not Pro/trial). */}
+      {effectiveTier === 'free' && Number.isFinite(aiRemaining) ? (
+        <Text style={{ fontSize: 10, color: theme.t6, marginTop: -2 }}>
+          {aiRemaining} of 5 AI calls remaining this month
+        </Text>
+      ) : null}
       {(loading || result) && (
         <View
           style={{
@@ -1147,7 +1182,7 @@ function renderInline(text, theme) {
 
 // ----- Conversation Log component with Add Note + Import Notes flows -----
 
-function ConvLog({ contact, onUpdate, showToast }) {
+function ConvLog({ contact, onUpdate, showToast, consumeAiCall }) {
   const { theme } = useTheme();
   const [note, setNote] = useState('');
   const [adding, setAdding] = useState(false);
@@ -1313,6 +1348,7 @@ function ConvLog({ contact, onUpdate, showToast }) {
         onClose={() => setImporting(false)}
         contact={contact}
         onSave={handleImportSave}
+        consumeAiCall={consumeAiCall}
       />
 
       {log.length === 0 && !adding ? (
@@ -1627,7 +1663,7 @@ function summaryFlagsAsIrrelevant(summary, contactName) {
   return false;
 }
 
-function ImportNotesModal({ visible, onClose, contact, onSave }) {
+function ImportNotesModal({ visible, onClose, contact, onSave, consumeAiCall }) {
   const { theme } = useTheme();
   const [raw, setRaw] = useState('');
   const [extracted, setExtracted] = useState('');
@@ -1658,6 +1694,10 @@ function ImportNotesModal({ visible, onClose, contact, onSave }) {
 
   async function extract() {
     if (!raw.trim()) return;
+    if (consumeAiCall) {
+      const allowed = await consumeAiCall('ai_limit_reached');
+      if (!allowed) return;
+    }
     setLoading(true);
     setError('');
     setPendingIrrelevant('');
@@ -1992,7 +2032,7 @@ function TextInputBox({ value, onChangeText, placeholder, small, tall }) {
   );
 }
 
-function Templates({ contact }) {
+function Templates({ contact, consumeAiCall, aiRemaining, effectiveTier }) {
   const { theme } = useTheme();
   const [expanded, setExpanded] = useState(false);
   const [selType, setSelType] = useState(null);
@@ -2000,6 +2040,10 @@ function Templates({ contact }) {
   const [loading, setLoading] = useState(false);
 
   async function generate(type) {
+    if (consumeAiCall) {
+      const allowed = await consumeAiCall('ai_limit_reached');
+      if (!allowed) return;
+    }
     setSelType(type);
     setResult('');
     setLoading(true);
@@ -2086,7 +2130,7 @@ function Templates({ contact }) {
           )}
           {result && !loading && (
             <View style={{ backgroundColor: theme.bg3, padding: 14, borderRadius: 12 }}>
-              <Text style={{ fontSize: 13, color: theme.t2, lineHeight: 22 }}>{result}</Text>
+              <MarkdownText text={result} theme={theme} />
             </View>
           )}
         </View>

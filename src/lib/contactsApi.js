@@ -46,6 +46,13 @@ function fromDb(row) {
   };
 }
 
+// Returns true if the given string looks like a UUID (e.g. real Supabase ID),
+// not a Date.now() timestamp or short sample ID. Postgres only accepts UUIDs
+// for the `id` column; sending anything else throws "invalid input syntax".
+function isUuid(s) {
+  return typeof s === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s);
+}
+
 // Translate a contact from local app shape into the DB row shape.
 function toDb(contact, userId) {
   const row = {
@@ -89,9 +96,10 @@ function toDb(contact, userId) {
       sampleAddedAt: contact.sampleAddedAt || null,
     },
   };
-  // Only include id if it's a real UUID (existing record).
-  // Skip local sample IDs like 's1', 's2' etc.
-  if (contact.id && contact.id.length > 10) {
+  // Only include id if it's a real UUID. Skips local sample IDs ('s1') and
+  // legacy timestamp IDs (Date.now()). Without this Supabase rejects the row
+  // with "invalid input syntax for type uuid".
+  if (isUuid(contact.id)) {
     row.id = contact.id;
   }
   return row;
@@ -128,7 +136,7 @@ export async function syncContacts(localContacts, userId) {
   const cloudIds = new Set((existing || []).map((r) => r.id));
   const localIds = new Set(
     localContacts
-      .filter((c) => c.id && c.id.length > 10)
+      .filter((c) => isUuid(c.id))
       .map((c) => c.id),
   );
 

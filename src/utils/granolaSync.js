@@ -53,6 +53,7 @@ export async function runGranolaSync({
   onProgress,
   onCommit,
   addToReviewQueue,
+  granolaAiUnlocked = true,
 }) {
   if (!apiKey) {
     throw new Error('No Granola API key');
@@ -141,7 +142,11 @@ export async function runGranolaSync({
     // 2a) Auto-save email matches
     for (const { contact } of matches.emailMatches) {
       try {
-        const extracted = await aiExtractMeetingNote(contact, rawText);
+        // Free users: save the raw Granola note as-is (no Claude extraction).
+        // Pro users: run Claude to extract a contact-targeted note.
+        const extracted = granolaAiUnlocked
+          ? await aiExtractMeetingNote(contact, rawText)
+          : (rawText || '').trim() || meetingTitle;
         const entry = {
           id: 'granola_' + note.id + '_' + contact.id,
           date,

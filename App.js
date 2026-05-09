@@ -2,7 +2,7 @@ import { onAuthChange } from './src/lib/auth';
 import AuthScreen from './src/screens/AuthScreen';
 import 'react-native-gesture-handler';
 import React, { useState, useEffect, useRef } from 'react';
-import { View, Text, ActivityIndicator, Alert } from 'react-native';
+import { View, Text, ActivityIndicator, Alert, Linking } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
@@ -18,6 +18,8 @@ import NavBar from './src/components/NavBar';
 import { Toast } from './src/components/Common';
 import LogTouchpointModal from './src/components/LogTouchpointModal';
 import ContactForm from './src/components/ContactForm';
+import PaywallModal from './src/components/PaywallModal';
+import { createCheckoutSession } from './src/lib/stripeApi';
 
 import ContactsScreen from './src/screens/ContactsScreen';
 import DetailScreen from './src/screens/DetailScreen';
@@ -172,6 +174,7 @@ function AppInner() {
           onProgress: () => {}, // silent
           onCommit: store.commit,
           addToReviewQueue: store.addToReviewQueue,
+          granolaAiUnlocked: store.featureUnlocked('granolaAiProcessing'),
         });
 
         // Only show toast if anything actually happened
@@ -189,6 +192,58 @@ function AppInner() {
     setToast({ msg, color });
     setTimeout(() => setToast(null), 2200);
   }
+
+  // Handles the "Start trial" button on the paywall modal. Asks the Stripe
+  // Edge Function to create a checkout session, then opens the URL in the
+  // browser. Stripe redirects back via a `radius://` deep link after pay or
+  // cancel, which is handled by the Linking listener below.
+  async function handleStartTrial(plan = 'monthly') {
+    try {
+      const { url } = await createCheckoutSession({ plan, trial: true });
+      store.dismissPaywall();
+      const supported = await Linking.canOpenURL(url);
+      if (supported) {
+        await Linking.openURL(url);
+      } else {
+        Alert.alert(
+          'Could not open checkout',
+          'Please try again or contact support.',
+        );
+      }
+    } catch (e) {
+      console.error('handleStartTrial failed:', e?.message);
+      Alert.alert('Could not start checkout', e?.message || 'Try again later.');
+    }
+  }
+
+  // Listen for deep link returns from Stripe checkout. The Edge Function
+  // sets success_url and cancel_url to radius:// URLs that we intercept here.
+  // On success, refresh the profile so the new tier is reflected.
+  useEffect(() => {
+    const handleUrl = ({ url }) => {
+      if (!url) return;
+      if (url.startsWith('radius://checkout-success')) {
+        showToast('Welcome to Pro!', theme.ac);
+        // Refresh tier from server. Webhook may take a moment to fire so
+        // give it a beat. Two retries in case the first is too quick.
+        setTimeout(() => store.refetchProfile(), 1500);
+        setTimeout(() => store.refetchProfile(), 4500);
+      } else if (url.startsWith('radius://checkout-cancel')) {
+        showToast('Checkout canceled', theme.t5);
+      }
+    };
+    const sub = Linking.addEventListener('url', handleUrl);
+    // Also check if app was opened with a URL from cold start.
+    Linking.getInitialURL().then((url) => {
+      if (url) handleUrl({ url });
+    });
+    return () => {
+      try {
+        sub.remove();
+      } catch (_) {}
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [theme.ac]);
 
   function commitContact(updated, skipDupeCheck) {
     const exists = store.contacts.find((c) => c.id === updated.id);
@@ -378,6 +433,18 @@ function AppInner() {
     );
   }
 
+  // Modals that should appear on every screen of the app go here. Each
+  // return block below includes {globalModals} so the paywall, etc., can
+  // surface from any view (DetailScreen, ContactForm, etc).
+  const globalModals = (
+    <PaywallModal
+      visible={!!store.paywallReason}
+      reason={store.paywallReason}
+      onDismiss={store.dismissPaywall}
+      onStartTrial={(plan) => handleStartTrial(plan || 'monthly')}
+    />
+  );
+
   if (!authChecked) {
     return (
       <View style={{ flex: 1, backgroundColor: theme.bg, justifyContent: 'center', alignItems: 'center' }}>
@@ -425,7 +492,11 @@ function AppInner() {
           showToast={showToast}
           mailingLists={store.mailingLists}
           onToggleContactOnList={toggleContactOnListLocal}
+          consumeAiCall={store.consumeAiCall}
+          aiRemaining={store.aiRemaining}
+          effectiveTier={store.effectiveTier}
         />
+        {globalModals}
         <Toast toast={toast} />
       </View>
     );
@@ -462,6 +533,7 @@ function AppInner() {
           onAddInterest={store.addCustomInterest}
           mailingLists={store.mailingLists}
         />
+        {globalModals}
         <Toast toast={toast} />
       </View>
     );
@@ -493,6 +565,7 @@ function AppInner() {
           mailingLists={store.mailingLists}
           isMyCard
         />
+        {globalModals}
         <Toast toast={toast} />
       </View>
     );
@@ -513,6 +586,7 @@ function AppInner() {
           onBack={() => setView('list')}
           showToast={showToast}
         />
+        {globalModals}
         <Toast toast={toast} />
       </View>
     );
@@ -533,6 +607,7 @@ function AppInner() {
           }}
           onBack={() => setView('list')}
         />
+        {globalModals}
         <Toast toast={toast} />
       </View>
     );
@@ -557,6 +632,7 @@ function AppInner() {
             setView('mailing_lists');
           }}
         />
+        {globalModals}
         <Toast toast={toast} />
       </View>
     );
@@ -578,7 +654,10 @@ function AppInner() {
             setTab('settings');
           }}
           showToast={showToast}
+          granolaAiUnlocked={store.featureUnlocked('granolaAiProcessing')}
+          onShowPaywall={store.showPaywall}
         />
+        {globalModals}
         <Toast toast={toast} />
       </View>
     );
@@ -619,6 +698,7 @@ function AppInner() {
             setTab('contacts');
           }}
         />
+        {globalModals}
         <Toast toast={toast} />
       </View>
     );
@@ -698,6 +778,7 @@ function AppInner() {
           onRemoveFromReviewQueue={store.removeFromReviewQueue}
           onClearReviewQueue={store.clearReviewQueue}
           onOpenReviewQueue={openReviewQueue}
+          granolaAiUnlocked={store.featureUnlocked('granolaAiProcessing')}
         />
       )}
 
@@ -722,6 +803,7 @@ function AppInner() {
         onSave={saveLogEntry}
       />
 
+      {globalModals}
       <Toast toast={toast} />
     </View>
   );
