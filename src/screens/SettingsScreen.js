@@ -6,6 +6,7 @@ import {
   TouchableOpacity,
   Alert,
   ActivityIndicator,
+  Linking,
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -40,6 +41,7 @@ import {
 } from '../constants/tagLibrary';
 import { testKey as granolaTestKey } from '../utils/granola';
 import { runGranolaSync } from '../utils/granolaSync';
+import { createPortalSession } from '../lib/stripeApi';
 import * as FileSystem from 'expo-file-system';
 import * as Sharing from 'expo-sharing';
 import * as Contacts from 'expo-contacts';
@@ -76,13 +78,46 @@ export default function SettingsScreen({
   onClearReviewQueue,
   onOpenReviewQueue,
   granolaAiUnlocked,
+  // Tier / subscription
+  tier,
+  effectiveTier,
+  trialActive,
+  trialDaysLeft,
+  aiCallsCount,
+  aiRemaining,
+  hasStripeCustomer,
+  onShowPaywall,
 }) {
   const { theme, themeName, toggleTheme } = useTheme();
   const insets = useSafeAreaInsets();
   const [openSection, setOpenSection] = useState(null);
+  // Tracks an in-flight call to create a Stripe billing portal session.
+  // Disables the button and shows a spinner while open.
+  const [portalLoading, setPortalLoading] = useState(false);
 
   function toggleSection(s) {
     setOpenSection(openSection === s ? null : s);
+  }
+
+  // Open the Stripe Customer Portal so the user can manage their subscription
+  // (cancel, update card, view invoices). Calls the Edge Function to create
+  // a portal session and opens the returned URL.
+  async function openBillingPortal() {
+    if (portalLoading) return;
+    setPortalLoading(true);
+    try {
+      const { url } = await createPortalSession();
+      const supported = await Linking.canOpenURL(url);
+      if (supported) {
+        await Linking.openURL(url);
+      } else {
+        Alert.alert('Could not open billing portal', 'Try again later.');
+      }
+    } catch (e) {
+      console.error('openBillingPortal failed:', e?.message);
+      Alert.alert('Could not open billing portal', e?.message || 'Try again later.');
+    }
+    setPortalLoading(false);
   }
 
   async function importContacts() {
@@ -195,6 +230,20 @@ export default function SettingsScreen({
         >
           Settings
         </Text>
+
+        {/* Subscription / tier display. Always shown, copy varies by tier. */}
+        <SubscriptionCard
+          theme={theme}
+          tier={effectiveTier}
+          trialActive={trialActive}
+          trialDaysLeft={trialDaysLeft}
+          aiCallsCount={aiCallsCount}
+          aiRemaining={aiRemaining}
+          hasStripeCustomer={hasStripeCustomer}
+          portalLoading={portalLoading}
+          onUpgrade={() => onShowPaywall && onShowPaywall('upgrade')}
+          onManage={openBillingPortal}
+        />
 
         {/* My Card */}
         <SettingsSection
@@ -1308,6 +1357,129 @@ function InterestsManager({ customInterests, hiddenInterests, onSaveCustom, onSa
       <Text style={{ color: theme.t6, fontSize: 10, marginTop: 8 }}>
         Tap to hide / show. Long-press custom interests to delete.
       </Text>
+    </View>
+  );
+}
+
+// SubscriptionCard — shows current plan + AI usage + upgrade or manage CTA.
+// Free: shows "X of 5 AI calls used" and an Upgrade button.
+// Trial: shows "X days left in trial" and a Manage subscription button.
+// Pro: shows "Pro plan, unlimited AI" and a Manage subscription button.
+function SubscriptionCard({
+  theme,
+  tier,
+  trialActive,
+  trialDaysLeft,
+  aiCallsCount,
+  aiRemaining,
+  hasStripeCustomer,
+  portalLoading,
+  onUpgrade,
+  onManage,
+}) {
+  // Treat anything not 'pro' or 'trial' as free. This catches null/undefined/
+  // unexpected tier values from the database.
+  const isPro = tier === 'pro' && !trialActive;
+  const isTrial = tier === 'trial' || trialActive;
+  const isFree = !isPro && !isTrial;
+
+  let label = 'Free';
+  let subline = '';
+  if (isTrial) {
+    label = 'Pro · trial';
+    subline =
+      trialDaysLeft != null
+        ? trialDaysLeft + (trialDaysLeft === 1 ? ' day' : ' days') + ' remaining'
+        : 'Trial active';
+  } else if (isPro) {
+    label = 'Pro';
+    subline = 'Unlimited AI · all features unlocked';
+  } else {
+    // Free — show usage. Use 5 as the cap fallback if aiRemaining is weird.
+    const used = Number.isFinite(aiCallsCount) ? aiCallsCount : 0;
+    const total =
+      Number.isFinite(aiRemaining) && aiRemaining > 0
+        ? used + aiRemaining
+        : 5;
+    subline = used + ' of ' + total + ' AI calls used this month';
+  }
+
+  return (
+    <View
+      style={{
+        backgroundColor: isFree ? theme.bg2 : theme.bgAc,
+        borderWidth: 1,
+        borderColor: isFree ? theme.brd : theme.brdAc,
+        borderRadius: 16,
+        padding: 16,
+        marginBottom: 16,
+      }}
+    >
+      <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+        <View style={{ flex: 1 }}>
+          <Text
+            style={{
+              fontSize: 10,
+              color: theme.t5,
+              fontWeight: '700',
+              letterSpacing: 0.5,
+              textTransform: 'uppercase',
+              marginBottom: 4,
+            }}
+          >
+            Your plan
+          </Text>
+          <Text
+            style={{
+              fontSize: 18,
+              fontWeight: '700',
+              color: isFree ? theme.t1 : theme.ac,
+              marginBottom: 2,
+              fontFamily: theme.fontDisplay,
+            }}
+          >
+            {label}
+          </Text>
+          {subline ? (
+            <Text style={{ fontSize: 12, color: theme.t4 }}>{subline}</Text>
+          ) : null}
+        </View>
+        {isFree ? (
+          <TouchableOpacity
+            onPress={onUpgrade}
+            activeOpacity={0.8}
+            style={{
+              paddingHorizontal: 14,
+              paddingVertical: 10,
+              borderRadius: 10,
+              backgroundColor: theme.ac,
+            }}
+          >
+            <Text style={{ color: '#fff', fontSize: 12, fontWeight: '700' }}>Upgrade</Text>
+          </TouchableOpacity>
+        ) : hasStripeCustomer ? (
+          <TouchableOpacity
+            onPress={onManage}
+            disabled={portalLoading}
+            activeOpacity={0.8}
+            style={{
+              paddingHorizontal: 14,
+              paddingVertical: 10,
+              borderRadius: 10,
+              borderWidth: 1,
+              borderColor: theme.ac,
+              backgroundColor: 'transparent',
+              opacity: portalLoading ? 0.5 : 1,
+              flexDirection: 'row',
+              alignItems: 'center',
+              gap: 6,
+            }}
+          >
+            {portalLoading ? <ActivityIndicator color={theme.ac} size="small" /> : null}
+            <Text style={{ color: theme.ac, fontSize: 12, fontWeight: '700' }}>Manage</Text>
+          </TouchableOpacity>
+        ) : null}
+      </View>
     </View>
   );
 }

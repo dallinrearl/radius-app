@@ -779,6 +779,14 @@ function AppInner() {
           onClearReviewQueue={store.clearReviewQueue}
           onOpenReviewQueue={openReviewQueue}
           granolaAiUnlocked={store.featureUnlocked('granolaAiProcessing')}
+          tier={store.tier}
+          effectiveTier={store.effectiveTier}
+          trialActive={store.trialActive}
+          trialDaysLeft={store.trialDaysLeft}
+          aiCallsCount={store.aiCallsCount}
+          aiRemaining={store.aiRemaining}
+          hasStripeCustomer={!!store.profile?.stripe_customer_id}
+          onShowPaywall={store.showPaywall}
         />
       )}
 
