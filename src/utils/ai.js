@@ -5,6 +5,7 @@ import { supabase } from '../lib/supabase';
 
 // ---------- Core caller ----------
 
+// Plain text path. Returns the trimmed text response.
 async function callClaude({ system, prompt, max_tokens = 800 }) {
   const { data, error } = await supabase.functions.invoke('claude', {
     body: { system, prompt, max_tokens },
@@ -21,10 +22,75 @@ async function callClaude({ system, prompt, max_tokens = 800 }) {
   return (data?.text || '').trim();
 }
 
+// Structured output path. Pass a tool schema; Claude is forced to return
+// data matching the schema. The structured `input` is returned directly,
+// already parsed — no JSON.parse, no markdown stripping, no fallbacks.
+//
+// `tool` shape:
+//   {
+//     name: 'extract_contact',
+//     description: 'Extract structured contact info',
+//     input_schema: {
+//       type: 'object',
+//       properties: { name: { type: 'string' }, ... },
+//       required: ['name']
+//     }
+//   }
+async function callClaudeWithTool({ system, prompt, tool, max_tokens = 800 }) {
+  const { data, error } = await supabase.functions.invoke('claude', {
+    body: {
+      system,
+      prompt,
+      max_tokens,
+      tools: [tool],
+      tool_choice: { type: 'tool', name: tool.name },
+    },
+  });
+
+  if (error) {
+    console.error('claude function error:', error);
+    throw new Error(error.message || 'AI call failed');
+  }
+  if (data?.error) {
+    console.error('claude function returned error:', data.error);
+    throw new Error(data.error);
+  }
+  if (!data?.tool_input) {
+    // Should not happen when tool_choice forces a tool, but guard anyway.
+    console.warn('callClaudeWithTool: no tool_input in response, falling back', data);
+    throw new Error('AI did not return structured data');
+  }
+  return data.tool_input;
+}
+
 // ---------- Date helpers ----------
 
 function todayISO() {
   return new Date().toISOString().slice(0, 10);
+}
+
+// Returns an ISO date string for N days before today. Used internally.
+function todayMinusDays(n) {
+  const d = new Date();
+  d.setDate(d.getDate() - n);
+  return d.toISOString().slice(0, 10);
+}
+
+// Returns a US-style MM/DD/YYYY string for N days before today.
+// Used in prompts where Claude generates human-facing copy. Reading "last
+// week (5/2/2026)" feels natural; "last week (2026-05-02)" reads like a log.
+function todayMinusDaysUS(n) {
+  const d = new Date();
+  d.setDate(d.getDate() - n);
+  const m = d.getMonth() + 1;
+  const day = d.getDate();
+  const y = d.getFullYear();
+  return m + '/' + day + '/' + y;
+}
+
+// Today as MM/DD/YYYY.
+function todayUS() {
+  return todayMinusDaysUS(0);
 }
 
 function daysBetween(isoDate) {
@@ -473,21 +539,19 @@ export async function aiSuggestContactsForAttendee({ attendee, meetingTitle, mee
     `the user's contact list who could plausibly be this person.
 
 RULES:
-- Output ONLY valid JSON. No commentary, no markdown fences.
-- Format: an array of up to 3 objects, ranked best first. Each ` +
-    `object: { "contactId": "...", "confidence": "high"|"medium"|"low", "reason": "..." }
-- If no contact is a plausible match, return an empty array: []
+- Use ONLY the contactId values exactly as listed in the candidates. ` +
+    `Do not invent IDs.
+- If no contact is a plausible match, return an empty suggestions array.
 - "reason" should be ONE short sentence (under 15 words) that names ` +
     `the specific evidence. e.g. "First name matches, both work in ` +
     `commercial real estate." or "Mentioned by name in transcript."
-- Use ONLY the contactId values exactly as listed in the candidates. ` +
-    `Do not invent IDs.
 - Confidence: "high" = name + corroborating context (industry, ` +
     `mutual topic, prior log entry). "medium" = name match alone or ` +
     `weak corroboration. "low" = thin guess.
 - Do NOT include the user themselves. Do NOT include archived contacts ` +
     `(they aren't in the candidates list).
-- A bare first-name match alone is "medium" at best, never "high".`;
+- A bare first-name match alone is "medium" at best, never "high".
+- Return up to 3 suggestions, ranked best first.`;
 
   const prompt =
     `Unmatched attendee:\n${attendeeLine}\n\n` +
@@ -501,45 +565,77 @@ RULES:
         const last = c.lastTopic ? ` | last: ${c.lastTopic}` : '';
         return `${c.id} | ${c.name}${role ? ' | ' + role : ''}${tags}${last}`;
       })
-      .join('\n') +
-    `\n\nReturn JSON only, an array of up to 3 ranked guesses (or [] if none).`;
+      .join('\n');
 
-  const text = await callClaude({ system, prompt, max_tokens: 500 });
-  const cleaned = text.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim();
+  // Tool schema forces Claude to return data in this exact shape.
+  // No JSON.parse, no markdown stripping, no fallback prose handling.
+  const tool = {
+    name: 'suggest_contact_matches',
+    description: 'Suggest CRM contacts that might match an unmatched meeting attendee.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        suggestions: {
+          type: 'array',
+          description: 'Up to 3 ranked candidate matches. Empty array if no plausible match.',
+          items: {
+            type: 'object',
+            properties: {
+              contactId: {
+                type: 'string',
+                description: 'Exact contactId from the candidates list. Do not invent.',
+              },
+              confidence: {
+                type: 'string',
+                enum: ['high', 'medium', 'low'],
+                description: 'How confident this match is.',
+              },
+              reason: {
+                type: 'string',
+                description: 'One short sentence (under 15 words) naming specific evidence.',
+              },
+            },
+            required: ['contactId', 'confidence', 'reason'],
+          },
+        },
+      },
+      required: ['suggestions'],
+    },
+  };
 
+  let result;
   try {
-    const parsed = JSON.parse(cleaned);
-    if (!Array.isArray(parsed)) return [];
-
-    // Validate each entry; drop anything pointing at an unknown contact.
-    const knownIds = new Set(candidates.map((c) => c.id));
-    return parsed
-      .filter((s) => s && knownIds.has(s.contactId))
-      .slice(0, 3)
-      .map((s) => ({
-        contactId: s.contactId,
-        confidence: ['high', 'medium', 'low'].includes(s.confidence)
-          ? s.confidence
-          : 'low',
-        reason: typeof s.reason === 'string' ? s.reason.slice(0, 200) : '',
-      }));
+    result = await callClaudeWithTool({ system, prompt, tool, max_tokens: 500 });
   } catch (e) {
-    console.error('aiSuggestContactsForAttendee parse error:', e, 'raw:', text);
+    console.error('aiSuggestContactsForAttendee tool call failed:', e?.message);
     return [];
   }
+
+  const suggestions = Array.isArray(result?.suggestions) ? result.suggestions : [];
+  // Validate against known IDs and clamp.
+  const knownIds = new Set(candidates.map((c) => c.id));
+  return suggestions
+    .filter((s) => s && knownIds.has(s.contactId))
+    .slice(0, 3)
+    .map((s) => ({
+      contactId: s.contactId,
+      confidence: ['high', 'medium', 'low'].includes(s.confidence)
+        ? s.confidence
+        : 'low',
+      reason: typeof s.reason === 'string' ? s.reason.slice(0, 200) : '',
+    }));
 }
 
 // ---------- aiSummarizeMeetingForReview ----------
 //
-// For the review queue. Generates a contact-agnostic summary of a meeting
-// transcript so the user can decide which of their contacts (if any) the
-// unmatched attendees correspond to. Different from aiExtractMeetingNote
-// which is targeted at one specific contact.
+// For the review queue. Generates a summary focused on the OTHER attendees
+// (not the user) so the user can decide which of their CRM contacts the
+// unmatched attendees correspond to.
 //
 // Truncates input to ~3000 chars before sending. Real meeting transcripts
-// can be 10K-30K tokens, but the first chunk + a middle slice is enough to
-// identify speakers. This is the main cost lever — without it, each call
-// costs ~$0.03; with it, ~$0.005.
+// can be 10K-30K tokens, but the first chunk + a tail slice is enough to
+// identify speakers. Main cost lever — without truncation each call is
+// ~$0.03; with it, ~$0.005.
 
 function trimForMeetingSummary(rawText) {
   if (!rawText) return '';
@@ -552,47 +648,59 @@ function trimForMeetingSummary(rawText) {
   return head + '\n\n[...transcript truncated...]\n\n' + tail;
 }
 
-export async function aiSummarizeMeetingForReview(rawText) {
+export async function aiSummarizeMeetingForReview(rawText, userInfo = {}) {
   if (!rawText?.trim()) {
     throw new Error('No text provided');
   }
   const trimmed = trimForMeetingSummary(rawText);
+
+  const userName = (userInfo.name || '').trim();
+  const userCompany = (userInfo.company || '').trim();
+  const userIdLine = userName
+    ? `The user is ${userName}${userCompany ? ` (${userCompany})` : ''}. ` +
+      `Do NOT mention them or their info in the summary. They already know who they are.`
+    : `The user is one of the speakers. Try to identify which speaker they ` +
+      `aren't and focus only on the OTHER attendees.`;
+
   const system =
-    `You write a 2-3 sentence summary of a meeting transcript so someone ` +
-    `can identify which of their CRM contacts is in it.
+    `You write a 1-3 sentence summary of who the OTHER attendees in a meeting ` +
+    `are, so the user can identify them in their CRM contact list.
+
+${userIdLine}
 
 HARD RULES:
-- Maximum 3 sentences. Never more.
-- Around 50-70 words total. Tight.
-- Lead with: who's in the meeting (names + key identifying detail like ` +
-    `company or role).
-- Then: what they discussed in one short clause.
-- Skip: biographical history, life backgrounds, deep career arcs, ` +
-    `relationship dynamics, what either party "is seeking", future plans, ` +
-    `inferences about networks or alma maters unless it's the single most ` +
-    `defining fact.
-- Names and companies only. No fluff.
-- If a speaker has no name (just "Speaker A"), say so. Don't invent.
+- Maximum 3 sentences. Often 1-2 is enough.
+- Around 30-60 words total. Tight.
+- Focus ONLY on the people who are NOT the user. The user is excluded.
+- For each non-user speaker: name + company + role/context + anything ` +
+    `identifying (location, what they do, who they know, what they're ` +
+    `working on).
+- Skip: anything about the user, biographical histories, career arcs ` +
+    `going back years, who introduced whom, relationship dynamics.
+- If a non-user speaker has no name (just "Speaker B" etc), say so. ` +
+    `Don't invent.
 
 EXAMPLE GOOD OUTPUT:
-"Lucas (Utah Housing Preservation Fund) and Dallin (West 77 Partners, ` +
-    `extended-stay hotels) caught up after both moving to Lehi. Discussed ` +
-    `their respective work in affordable housing and hotel development."
+"Lane: Bank of Utah, commercial lending, ~1 year tenure. Interested in ` +
+    `lending partnership for extended-stay hotel deals."
 
-EXAMPLE BAD OUTPUT (too long, too biographical):
-"Two BYU finance alumni connected after relocating to Lehi. Lucas grew ` +
-    `up in Houston, served an LDS mission in Rome, and currently runs the ` +
-    `Utah Housing Preservation Fund where he focuses on multifamily ` +
-    `acquisitions of affordable housing..." (this is wrong — too much ` +
-    `backstory)
+EXAMPLE BAD OUTPUT (mentions the user):
+"Dallin (West 77 Partners) met with Lane (Bank of Utah, commercial ` +
+    `lending) to explore a lending partnership..." (this is wrong — ` +
+    `the user is Dallin, his info is irrelevant to him)
 
-NO HEADERS. NO BULLETS. NO PREAMBLE like "This meeting was about". ` +
-    `Just the summary.
+EXAMPLE BAD OUTPUT (too long, biographical):
+"Lane has been at Bank of Utah for about a year, prior to which he ` +
+    `worked at Wells Fargo. He grew up in Idaho..." (this is wrong — ` +
+    `extra biographical fluff that doesn't help identify them)
+
+NO HEADERS. NO BULLETS. NO PREAMBLE. Just the focused identification.
 
 ${HONESTY_RULES}`;
   const prompt =
     `Meeting transcript:\n\n${trimmed}\n\n` +
-    `Write a 2-3 sentence summary. Names + companies + one-clause topic. Stop.`;
+    `Summarize the OTHER attendees in 1-3 sentences. Skip the user. ` +
+    `Names + identifying details only.`;
   return callClaude({ system, prompt, max_tokens: 150 });
 }
 
@@ -602,31 +710,66 @@ export async function aiExtractFromVoice(transcript) {
   if (!transcript?.trim()) {
     return { name: '', company: '', role: '', email: '', phone: '', howMet: '', notes: '' };
   }
-  const system =
-    `You extract structured contact information from voice transcripts. ` +
-    `Output only valid JSON. No commentary, no markdown fences. Keys: ` +
-    `name, company, role, email, phone, howMet, notes. Use empty ` +
-    `string "" for any field that cannot be inferred. The notes field ` +
-    `should hold the original transcript verbatim.`;
-  const prompt = `Transcript:\n${transcript}\n\nReturn JSON only.`;
-  const text = await callClaude({ system, prompt, max_tokens: 600 });
 
-  const cleaned = text.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim();
+  const today = todayUS();
+  const system =
+    `You extract structured contact information from voice transcripts ` +
+    `where the user is dictating a new contact. Pull out every field the ` +
+    `transcript mentions. Use an empty string "" for any field the ` +
+    `transcript does not specify. The 'notes' field should be the ` +
+    `original transcript verbatim, since the user may want to keep the ` +
+    `full source for reference.
+
+DATE HANDLING:
+- Today's date is ${today} (US format MM/DD/YYYY).
+- If the transcript uses relative phrases like "yesterday", "last week", ` +
+    `"a few months ago", "this morning", resolve them in the howMet ` +
+    `field to an approximate absolute date in MM/DD/YYYY format. ` +
+    `Examples: "last week" → "around ${todayMinusDaysUS(7)}", ` +
+    `"yesterday" → "yesterday (${todayMinusDaysUS(1)})", ` +
+    `"a few months ago" → "around ${todayMinusDaysUS(90)}".
+- ALWAYS use MM/DD/YYYY format. Never use YYYY-MM-DD or any other ` +
+    `format. Do not lead with the year.
+- Keep the natural wording but anchor it with the date so the note ` +
+    `still reads naturally six months from now.
+- If no time reference is given, just describe the location/context.`;
+  const prompt = `Transcript:\n${transcript}`;
+
+  const tool = {
+    name: 'extract_contact',
+    description: 'Extract structured contact information from a voice transcript.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        name: { type: 'string', description: "The contact's full name. Empty string if not mentioned." },
+        company: { type: 'string', description: "The company name. Empty string if not mentioned." },
+        role: { type: 'string', description: "Job title or role. Empty string if not mentioned." },
+        email: { type: 'string', description: "Email address. Empty string if not mentioned." },
+        phone: { type: 'string', description: "Phone number. Empty string if not mentioned." },
+        howMet: { type: 'string', description: "Where/how the user met this person. Empty string if not mentioned." },
+        notes: { type: 'string', description: "The original transcript verbatim." },
+      },
+      required: ['name', 'company', 'role', 'email', 'phone', 'howMet', 'notes'],
+    },
+  };
+
+  let result;
   try {
-    const parsed = JSON.parse(cleaned);
-    return {
-      name: parsed.name || '',
-      company: parsed.company || '',
-      role: parsed.role || '',
-      email: parsed.email || '',
-      phone: parsed.phone || '',
-      howMet: parsed.howMet || '',
-      notes: parsed.notes || transcript,
-    };
+    result = await callClaudeWithTool({ system, prompt, tool, max_tokens: 600 });
   } catch (e) {
-    console.error('aiExtractFromVoice parse error:', e, 'raw:', text);
+    console.error('aiExtractFromVoice tool call failed:', e?.message);
     return { name: '', company: '', role: '', email: '', phone: '', howMet: '', notes: transcript };
   }
+
+  return {
+    name: result.name || '',
+    company: result.company || '',
+    role: result.role || '',
+    email: result.email || '',
+    phone: result.phone || '',
+    howMet: result.howMet || '',
+    notes: result.notes || transcript,
+  };
 }
 
 // ---------- aiExtractFromImage ----------
