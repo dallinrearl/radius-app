@@ -3,7 +3,30 @@ import { storage } from '../utils/storage';
 import { supabase } from '../lib/supabase';
 import { fetchContacts, syncContacts } from '../lib/contactsApi';
 import { isoToday, addDays, nextDate, daysUntil } from '../utils/helpers';
-import { EMPTY_CONTACT, getSampleContacts, DEFAULT_TAGS, DEFAULT_INTERESTS } from '../constants';
+import {
+  EMPTY_CONTACT,
+  getSampleContacts,
+  DEFAULT_INTERESTS,
+} from '../constants';
+import { TAGS as MASTER_TAGS, COMMON_TAG_LABELS } from '../constants/tagLibrary';
+import { mergeQueue, removeFromQueue, updateQueueItem } from '../utils/reviewQueue';
+
+const MASTER_TAG_LABELS = MASTER_TAGS.map((t) => t.label);
+
+const HOLIDAY_LIST_ID = 'holiday_card_list';
+
+// AsyncStorage key for the Granola review queue. Local-only for Stage 1;
+// will migrate to Supabase user_settings when Stage 2 cron arrives.
+const REVIEW_QUEUE_STORAGE = 'crm-review-queue';
+
+function newMailingList(name) {
+  return {
+    id: 'list_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6),
+    name: name || 'Untitled List',
+    createdAt: new Date().toISOString(),
+    addressOverrides: {},
+  };
+}
 
 export function useAppStore() {
   const [userId, setUserId] = useState(null);
@@ -18,10 +41,27 @@ export function useAppStore() {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [onboarded, setOnboarded] = useState(true);
+
+  const [useType, setUseType] = useState([]);
+  const [samplesRequested, setSamplesRequestedState] = useState(null);
+
+  const [mailingLists, setMailingLists] = useState([]);
+
+  // Whether the user has dismissed the "still using samples?" banner.
+  // Stored locally so it persists across sessions on the same device.
+  const [samplesBannerDismissed, setSamplesBannerDismissedState] = useState(false);
+
+  // Granola review queue. Items needing user triage (name-only matches,
+  // unmatched attendees). Persisted to AsyncStorage for now.
+  const [reviewQueue, setReviewQueue] = useState([]);
+
   const [loaded, setLoaded] = useState(false);
   const [saving, setSaving] = useState(false);
+  // Tracks fetch errors so the UI can distinguish "no contacts" from
+  // "couldn't load contacts". Null = no error, string = last error message.
+  const [contactsFetchError, setContactsFetchError] = useState(null);
+  const [contactsFetching, setContactsFetching] = useState(false);
 
-  // Track the logged-in user
   useEffect(() => {
     let mounted = true;
     (async () => {
@@ -37,27 +77,29 @@ export function useAppStore() {
     };
   }, []);
 
-  // Load contacts from Supabase whenever the user changes
+  const refetchContacts = useCallback(async () => {
+    if (!userId) return;
+    setContactsFetching(true);
+    setContactsFetchError(null);
+    try {
+      const cloud = await fetchContacts();
+      setContacts(cloud);
+    } catch (e) {
+      console.error('refetchContacts error:', e);
+      setContactsFetchError(e?.message || 'Could not load contacts');
+    }
+    setContactsFetching(false);
+  }, [userId]);
+
   useEffect(() => {
     if (!userId) {
       setContacts([]);
+      setContactsFetchError(null);
       return;
     }
-    (async () => {
-      const cloud = await fetchContacts();
-      if (cloud.length > 0) {
-        setContacts(cloud);
-      } else {
-        // First time this user has signed in: seed with sample contacts
-        const samples = getSampleContacts(addDays, isoToday);
-        setContacts(samples);
-        const result = await syncContacts(samples, userId);
-        if (result.ok) setContacts(result.contacts);
-      }
-    })();
-  }, [userId]);
+    refetchContacts();
+  }, [userId, refetchContacts]);
 
-  // Load all the on-device settings on mount (these stay local for now)
   useEffect(() => {
     (async () => {
       try {
@@ -102,6 +144,52 @@ export function useAppStore() {
         const r = await storage.get('crm-password');
         if (r?.value) setPassword(r.value);
       } catch (_) {}
+      try {
+        const r = await storage.get('crm-use-type');
+        if (r?.value) setUseType(JSON.parse(r.value));
+      } catch (_) {}
+      try {
+        const r = await storage.get('crm-samples-requested');
+        if (r?.value === 'true') setSamplesRequestedState(true);
+        else if (r?.value === 'false') setSamplesRequestedState(false);
+      } catch (_) {}
+      try {
+        const r = await storage.get('crm-samples-banner-dismissed');
+        if (r?.value === 'true') setSamplesBannerDismissedState(true);
+      } catch (_) {}
+
+      try {
+        const r = await storage.get('crm-mailing-lists');
+        if (r?.value) {
+          setMailingLists(JSON.parse(r.value));
+        } else {
+          const seeded = await storage.get('crm-mailing-lists-seeded');
+          if (seeded?.value !== 'true') {
+            const initial = [
+              {
+                id: HOLIDAY_LIST_ID,
+                name: 'Holiday Card List',
+                createdAt: new Date().toISOString(),
+                addressOverrides: {},
+              },
+            ];
+            setMailingLists(initial);
+            try {
+              await storage.set('crm-mailing-lists', JSON.stringify(initial));
+              await storage.set('crm-mailing-lists-seeded', 'true');
+            } catch (_) {}
+          }
+        }
+      } catch (_) {}
+
+      try {
+        const r = await storage.get(REVIEW_QUEUE_STORAGE);
+        if (r?.value) {
+          const parsed = JSON.parse(r.value);
+          if (Array.isArray(parsed)) setReviewQueue(parsed);
+        }
+      } catch (_) {}
+
       setLoaded(true);
     })();
   }, []);
@@ -166,8 +254,169 @@ export function useAppStore() {
     } catch (_) {}
   }, []);
 
-  const allTags = [...DEFAULT_TAGS, ...customTags];
+  const saveUseType = useCallback(async (arr) => {
+    const safe = Array.isArray(arr) ? arr : [];
+    setUseType(safe);
+    try {
+      await storage.set('crm-use-type', JSON.stringify(safe));
+    } catch (_) {}
+  }, []);
+
+  const saveSamplesRequested = useCallback(async (val) => {
+    setSamplesRequestedState(val);
+    try {
+      await storage.set('crm-samples-requested', val ? 'true' : 'false');
+    } catch (_) {}
+  }, []);
+
+  // ---------- Sample cleanup ----------
+
+  const clearSampleContacts = useCallback(() => {
+    const next = contacts.filter((c) => !c.isSample);
+    if (next.length !== contacts.length) {
+      commit(next);
+    }
+  }, [contacts, commit]);
+
+  const dismissSamplesBanner = useCallback(async () => {
+    setSamplesBannerDismissedState(true);
+    try {
+      await storage.set('crm-samples-banner-dismissed', 'true');
+    } catch (_) {}
+  }, []);
+
+  // ---------- Mailing list CRUD ----------
+
+  const persistMailingLists = useCallback(async (next) => {
+    setMailingLists(next);
+    try {
+      await storage.set('crm-mailing-lists', JSON.stringify(next));
+    } catch (_) {}
+  }, []);
+
+  const createMailingList = useCallback(
+    async (name) => {
+      const list = newMailingList(name);
+      await persistMailingLists([...mailingLists, list]);
+      return list;
+    },
+    [mailingLists, persistMailingLists],
+  );
+
+  const renameMailingList = useCallback(
+    async (id, name) => {
+      const trimmed = (name || '').trim();
+      if (!trimmed) return;
+      const next = mailingLists.map((l) =>
+        l.id === id ? { ...l, name: trimmed } : l,
+      );
+      await persistMailingLists(next);
+    },
+    [mailingLists, persistMailingLists],
+  );
+
+  const deleteMailingList = useCallback(
+    async (id) => {
+      const next = mailingLists.filter((l) => l.id !== id);
+      await persistMailingLists(next);
+      const updatedContacts = contacts.map((c) => {
+        if (!Array.isArray(c.mailingLists) || !c.mailingLists.includes(id)) {
+          return c;
+        }
+        return {
+          ...c,
+          mailingLists: c.mailingLists.filter((x) => x !== id),
+        };
+      });
+      const anyTouched = updatedContacts.some((c, i) => c !== contacts[i]);
+      if (anyTouched) {
+        commit(updatedContacts);
+      }
+    },
+    [mailingLists, persistMailingLists, contacts, commit],
+  );
+
+  const setAddressOverride = useCallback(
+    async (listId, contactId, addressIndex) => {
+      const next = mailingLists.map((l) => {
+        if (l.id !== listId) return l;
+        const overrides = { ...(l.addressOverrides || {}) };
+        if (addressIndex == null || addressIndex < 0) {
+          delete overrides[contactId];
+        } else {
+          overrides[contactId] = addressIndex;
+        }
+        return { ...l, addressOverrides: overrides };
+      });
+      await persistMailingLists(next);
+    },
+    [mailingLists, persistMailingLists],
+  );
+
+  const toggleContactOnList = useCallback(
+    (contact, listId) => {
+      const current = Array.isArray(contact.mailingLists) ? contact.mailingLists : [];
+      const next = current.includes(listId)
+        ? current.filter((x) => x !== listId)
+        : [...current, listId];
+      const updated = { ...contact, mailingLists: next };
+      const updatedContacts = contacts.map((c) => (c.id === contact.id ? updated : c));
+      commit(updatedContacts);
+      return updated;
+    },
+    [contacts, commit],
+  );
+
+  // ---------- Review queue (Granola sync) ----------
+  //
+  // The queue holds items where sync couldn't confidently match an attendee
+  // to a contact. The user triages each item from ReviewQueueScreen.
+  // Items are deduplicated by stable id (noteId + attendee key), so re-syncing
+  // the same meeting won't re-add items the user has already handled.
+
+  const persistReviewQueue = useCallback(async (next) => {
+    setReviewQueue(next);
+    try {
+      await storage.set(REVIEW_QUEUE_STORAGE, JSON.stringify(next));
+    } catch (_) {}
+  }, []);
+
+  // Add new items to the queue (deduplicated by id). Used by sync.
+  const addToReviewQueue = useCallback(
+    async (newItems) => {
+      if (!Array.isArray(newItems) || newItems.length === 0) return;
+      const merged = mergeQueue(reviewQueue, newItems);
+      await persistReviewQueue(merged);
+    },
+    [reviewQueue, persistReviewQueue],
+  );
+
+  // Remove a single item from the queue by id. Used after triage.
+  const removeFromReviewQueue = useCallback(
+    async (itemId) => {
+      const next = removeFromQueue(reviewQueue, itemId);
+      await persistReviewQueue(next);
+    },
+    [reviewQueue, persistReviewQueue],
+  );
+
+  // Patch a queue item in place (e.g. to attach AI suggestions before showing them).
+  const patchReviewQueueItem = useCallback(
+    async (itemId, patch) => {
+      const next = updateQueueItem(reviewQueue, itemId, patch);
+      await persistReviewQueue(next);
+    },
+    [reviewQueue, persistReviewQueue],
+  );
+
+  // Clear the entire queue. Used by Disconnect Granola.
+  const clearReviewQueue = useCallback(async () => {
+    await persistReviewQueue([]);
+  }, [persistReviewQueue]);
+
+  const allTags = [...MASTER_TAG_LABELS, ...customTags];
   const visibleTags = allTags.filter((t) => !hiddenTags.includes(t));
+
   const allInterests = [...DEFAULT_INTERESTS, ...customInterests];
   const visibleInterests = allInterests.filter((t) => !hiddenInterests.includes(t));
 
@@ -210,12 +459,42 @@ export function useAppStore() {
       await storage.set('crm-password', n);
     } catch (_) {}
   };
-  const finishOnboarding = async () => {
-    setOnboarded(true);
-    try {
-      await storage.set('crm-onboarded', 'true');
-    } catch (_) {}
-  };
+
+  const finishOnboarding = useCallback(
+    async (opts = {}) => {
+      if (Array.isArray(opts.useType)) {
+        await saveUseType(opts.useType);
+      }
+      if (hiddenTags.length === 0) {
+        const seedHidden = MASTER_TAG_LABELS.filter(
+          (label) => !COMMON_TAG_LABELS.includes(label),
+        );
+        if (seedHidden.length > 0) {
+          await saveHiddenTags(seedHidden);
+        }
+      }
+      if (typeof opts.samplesRequested === 'boolean') {
+        await saveSamplesRequested(opts.samplesRequested);
+        if (opts.samplesRequested && contacts.length === 0) {
+          const samples = getSampleContacts(addDays, isoToday);
+          commit(samples);
+        }
+      }
+      setOnboarded(true);
+      try {
+        await storage.set('crm-onboarded', 'true');
+      } catch (_) {}
+    },
+    [
+      contacts.length,
+      commit,
+      saveUseType,
+      saveSamplesRequested,
+      saveHiddenTags,
+      hiddenTags.length,
+    ],
+  );
+
   const resetOnboarding = async () => {
     setOnboarded(false);
     try {
@@ -249,8 +528,16 @@ export function useAppStore() {
     username,
     password,
     onboarded,
+    useType,
+    samplesRequested,
+    samplesBannerDismissed,
+    mailingLists,
+    reviewQueue,
     loaded,
     saving,
+    contactsFetchError,
+    contactsFetching,
+    refetchContacts,
     commit,
     saveMyCard,
     saveCustomTags,
@@ -264,6 +551,19 @@ export function useAppStore() {
     saveDisplayName,
     saveUsername,
     savePassword,
+    saveUseType,
+    saveSamplesRequested,
+    clearSampleContacts,
+    dismissSamplesBanner,
+    createMailingList,
+    renameMailingList,
+    deleteMailingList,
+    setAddressOverride,
+    toggleContactOnList,
+    addToReviewQueue,
+    removeFromReviewQueue,
+    patchReviewQueueItem,
+    clearReviewQueue,
     finishOnboarding,
     resetOnboarding,
   };

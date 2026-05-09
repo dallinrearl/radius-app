@@ -1,13 +1,13 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   View,
   Text,
   ScrollView,
   TouchableOpacity,
   Alert,
-  Platform,
-  TextInput,
+  ActivityIndicator,
 } from 'react-native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useTheme } from '../styles/theme';
 import {
@@ -26,17 +26,27 @@ import {
   CardIcon,
   TagIcon,
   HeartIcon,
-  MailIcon,
   XIcon,
-  SearchIcon,
+  MailIcon,
+  ChatIcon,
 } from '../components/Icons';
 import { Avatar, Toggle, StyledInput } from '../components/Common';
-import { getTagColor, makeVcf } from '../utils/helpers';
-import { DEFAULT_TAGS, DEFAULT_INTERESTS } from '../constants';
+import { getTagColor, makeVcf, isoToday } from '../utils/helpers';
+import { DEFAULT_INTERESTS } from '../constants';
+import {
+  TAGS as MASTER_TAGS,
+  SUBCATEGORIES,
+  COMMON_TAG_LABELS,
+} from '../constants/tagLibrary';
+import { testKey as granolaTestKey } from '../utils/granola';
+import { runGranolaSync } from '../utils/granolaSync';
 import * as FileSystem from 'expo-file-system';
 import * as Sharing from 'expo-sharing';
 import * as Contacts from 'expo-contacts';
-import * as ImagePicker from 'expo-image-picker';
+
+const GRANOLA_KEY_STORAGE = 'crm-granola-key';
+const GRANOLA_LAST_SYNC_STORAGE = 'crm-granola-last-sync';
+const GRANOLA_PROCESSED_IDS_STORAGE = 'crm-granola-processed-ids';
 
 export default function SettingsScreen({
   myCard,
@@ -56,8 +66,15 @@ export default function SettingsScreen({
   onUnarchive,
   onPickContact,
   onSecurityPress,
+  onMailingListsPress,
+  mailingLists,
   onReplayWalkthrough,
   showToast,
+  reviewQueue,
+  onAddToReviewQueue,
+  onRemoveFromReviewQueue,
+  onClearReviewQueue,
+  onOpenReviewQueue,
 }) {
   const { theme, themeName, toggleTheme } = useTheme();
   const insets = useSafeAreaInsets();
@@ -142,6 +159,7 @@ export default function SettingsScreen({
         hiddenTags,
         customInterests,
         hiddenInterests,
+        mailingLists,
         exportedAt: new Date().toISOString(),
       });
       const path = FileSystem.cacheDirectory + 'radius_backup.json';
@@ -153,6 +171,8 @@ export default function SettingsScreen({
       Alert.alert('Backup failed', e.message);
     }
   }
+
+  const listsCount = Array.isArray(mailingLists) ? mailingLists.length : 0;
 
   return (
     <View style={{ flex: 1, backgroundColor: theme.bg }}>
@@ -294,6 +314,55 @@ export default function SettingsScreen({
           />
         </SettingsSection>
 
+        {/* Mailing Lists */}
+        <TouchableOpacity
+          onPress={onMailingListsPress}
+          style={{
+            backgroundColor: theme.bg2,
+            borderWidth: 1,
+            borderColor: theme.brd,
+            borderRadius: 14,
+            padding: 14,
+            marginBottom: 10,
+            flexDirection: 'row',
+            alignItems: 'center',
+            gap: 12,
+          }}
+        >
+          <MailIcon size={18} color={theme.info} />
+          <View style={{ flex: 1 }}>
+            <Text style={{ color: theme.t1, fontSize: 14, fontWeight: '500' }}>
+              Mailing Lists
+            </Text>
+            <Text style={{ color: theme.t5, fontSize: 11, marginTop: 2 }}>
+              {listsCount === 0
+                ? 'Create lists for cards, invites, and more'
+                : `${listsCount} ${listsCount === 1 ? 'list' : 'lists'}`}
+            </Text>
+          </View>
+          <ChevronRight size={16} color={theme.t5} />
+        </TouchableOpacity>
+
+        {/* Integrations */}
+        <SettingsSection
+          icon={<ChatIcon size={18} color={theme.ac} />}
+          title="Integrations"
+          subtitle="Connect Granola for automatic meeting notes"
+          open={openSection === 'integrations'}
+          onPress={() => toggleSection('integrations')}
+        >
+          <GranolaIntegration
+            myCard={myCard}
+            contacts={contacts}
+            onCommit={onCommit}
+            showToast={showToast}
+            reviewQueue={reviewQueue}
+            onAddToReviewQueue={onAddToReviewQueue}
+            onClearReviewQueue={onClearReviewQueue}
+            onOpenReviewQueue={onOpenReviewQueue}
+          />
+        </SettingsSection>
+
         {/* Security */}
         <TouchableOpacity
           onPress={onSecurityPress}
@@ -349,7 +418,6 @@ export default function SettingsScreen({
               onPress={() => toggleSection('archived')}
             />
           </View>
-          {openSection === 'archived' || openSection === 'data' ? null : null}
         </SettingsSection>
 
         {/* Archived list (inline) */}
@@ -428,6 +496,318 @@ export default function SettingsScreen({
   );
 }
 
+// =================== Granola Integration ===================
+//
+// Stage 1: manual-trigger sync with API key stored locally in AsyncStorage.
+// User pastes their Granola Personal API key, hits Test, then Sync Now to
+// pull recent notes and append them to matching contacts' convLog.
+
+function GranolaIntegration({
+  myCard,
+  contacts,
+  onCommit,
+  showToast,
+  reviewQueue,
+  onAddToReviewQueue,
+  onClearReviewQueue,
+  onOpenReviewQueue,
+}) {
+  const { theme } = useTheme();
+
+  const [apiKey, setApiKey] = useState('');
+  const [storedKey, setStoredKey] = useState(null); // null = unknown, '' = none, 'gk_...' = present
+  const [testing, setTesting] = useState(false);
+  const [syncing, setSyncing] = useState(false);
+  const [lastSync, setLastSync] = useState(null);
+  const [syncStatus, setSyncStatus] = useState('');
+
+  // Load stored key + last sync on mount
+  useEffect(() => {
+    (async () => {
+      try {
+        const k = await AsyncStorage.getItem(GRANOLA_KEY_STORAGE);
+        const ls = await AsyncStorage.getItem(GRANOLA_LAST_SYNC_STORAGE);
+        setStoredKey(k || '');
+        setLastSync(ls || null);
+      } catch (_) {
+        setStoredKey('');
+      }
+    })();
+  }, []);
+
+  const isConnected = !!storedKey;
+
+  async function testAndSave() {
+    const key = apiKey.trim();
+    if (!key) {
+      Alert.alert('Missing key', 'Paste your Granola API key first.');
+      return;
+    }
+    setTesting(true);
+    setSyncStatus('');
+    try {
+      const result = await granolaTestKey(key);
+      if (!result.ok) {
+        Alert.alert('Connection failed', result.error || 'Could not verify the key.');
+        setTesting(false);
+        return;
+      }
+      await AsyncStorage.setItem(GRANOLA_KEY_STORAGE, key);
+      setStoredKey(key);
+      setApiKey('');
+      showToast && showToast('Granola connected', theme.ac);
+    } catch (e) {
+      Alert.alert('Error', e.message || 'Could not connect.');
+    }
+    setTesting(false);
+  }
+
+  async function disconnect() {
+    Alert.alert(
+      'Disconnect Granola',
+      'This removes your API key from this device and clears any pending review items. Your existing meeting log entries will stay.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Disconnect',
+          style: 'destructive',
+          onPress: async () => {
+            await AsyncStorage.removeItem(GRANOLA_KEY_STORAGE);
+            await AsyncStorage.removeItem(GRANOLA_LAST_SYNC_STORAGE);
+            await AsyncStorage.removeItem(GRANOLA_PROCESSED_IDS_STORAGE);
+            if (onClearReviewQueue) {
+              await onClearReviewQueue();
+            }
+            setStoredKey('');
+            setLastSync(null);
+            setSyncStatus('');
+            showToast && showToast('Granola disconnected');
+          },
+        },
+      ],
+    );
+  }
+
+  async function syncNow() {
+    if (!storedKey) return;
+    setSyncing(true);
+    setSyncStatus('Fetching recent meetings...');
+
+    try {
+      const result = await runGranolaSync({
+        apiKey: storedKey,
+        contacts,
+        myCard,
+        onProgress: (msg) => setSyncStatus(msg),
+        onCommit,
+        addToReviewQueue: onAddToReviewQueue,
+      });
+
+      // Reflect the new last-sync timestamp in the UI
+      const now = new Date().toISOString();
+      setLastSync(now);
+
+      setSyncStatus(result.summary);
+      showToast && showToast(`Granola sync: ${result.summary}`, theme.ac);
+    } catch (e) {
+      console.error('Granola sync error:', e);
+      setSyncStatus('Sync failed: ' + (e.message || 'Unknown error'));
+      Alert.alert('Sync failed', e.message || 'Unknown error');
+    }
+
+    setSyncing(false);
+  }
+
+  function maskKey(k) {
+    if (!k) return '';
+    if (k.length < 12) return '••••';
+    return k.slice(0, 6) + '••••••••' + k.slice(-4);
+  }
+
+  // ---- Loading state ----
+  if (storedKey === null) {
+    return (
+      <View style={{ padding: 14 }}>
+        <ActivityIndicator color={theme.ac} size="small" />
+      </View>
+    );
+  }
+
+  // ---- Connected state ----
+  if (isConnected) {
+    return (
+      <View style={{ padding: 14, gap: 12 }}>
+        <View
+          style={{
+            backgroundColor: theme.bg3,
+            borderRadius: 12,
+            padding: 12,
+            gap: 8,
+          }}
+        >
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+            <View
+              style={{
+                width: 8,
+                height: 8,
+                borderRadius: 4,
+                backgroundColor: '#5BC97A',
+              }}
+            />
+            <Text style={{ color: theme.t1, fontSize: 13, fontWeight: '600' }}>
+              Granola connected
+            </Text>
+          </View>
+          <Text style={{ color: theme.t5, fontSize: 11, fontFamily: 'monospace' }}>
+            {maskKey(storedKey)}
+          </Text>
+          {lastSync ? (
+            <Text style={{ color: theme.t5, fontSize: 11 }}>
+              Last sync: {new Date(lastSync).toLocaleString()}
+            </Text>
+          ) : (
+            <Text style={{ color: theme.t5, fontSize: 11 }}>Not synced yet</Text>
+          )}
+        </View>
+
+        <TouchableOpacity
+          onPress={syncNow}
+          disabled={syncing}
+          style={{
+            paddingVertical: 12,
+            borderRadius: 12,
+            backgroundColor: theme.ac,
+            alignItems: 'center',
+            opacity: syncing ? 0.6 : 1,
+          }}
+        >
+          {syncing ? (
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+              <ActivityIndicator color="#fff" size="small" />
+              <Text style={{ color: '#fff', fontSize: 13, fontWeight: '700' }}>
+                Syncing...
+              </Text>
+            </View>
+          ) : (
+            <Text style={{ color: '#fff', fontSize: 13, fontWeight: '700' }}>
+              Sync Now
+            </Text>
+          )}
+        </TouchableOpacity>
+
+        {syncStatus ? (
+          <Text style={{ color: theme.t4, fontSize: 11, lineHeight: 16 }}>
+            {syncStatus}
+          </Text>
+        ) : null}
+
+        {/* Review queue access row (only shown when there are items) */}
+        {Array.isArray(reviewQueue) && reviewQueue.length > 0 ? (
+          <TouchableOpacity
+            onPress={() => onOpenReviewQueue && onOpenReviewQueue()}
+            style={{
+              flexDirection: 'row',
+              alignItems: 'center',
+              gap: 10,
+              paddingVertical: 11,
+              paddingHorizontal: 14,
+              borderRadius: 12,
+              borderWidth: 1,
+              borderColor: theme.warn + '50',
+              backgroundColor: theme.warn + '15',
+            }}
+          >
+            <View
+              style={{
+                paddingHorizontal: 7,
+                paddingVertical: 2,
+                borderRadius: 8,
+                backgroundColor: theme.warn,
+                minWidth: 22,
+                alignItems: 'center',
+              }}
+            >
+              <Text style={{ color: '#fff', fontSize: 11, fontWeight: '700' }}>
+                {reviewQueue.length}
+              </Text>
+            </View>
+            <Text style={{ flex: 1, color: theme.t1, fontSize: 13, fontWeight: '600' }}>
+              {reviewQueue.length === 1 ? 'Item to review' : 'Items to review'}
+            </Text>
+            <ChevronRight size={14} color={theme.t5} />
+          </TouchableOpacity>
+        ) : null}
+
+        <TouchableOpacity
+          onPress={disconnect}
+          style={{
+            paddingVertical: 10,
+            borderRadius: 12,
+            borderWidth: 1,
+            borderColor: theme.brdRed,
+            backgroundColor: theme.bgRed,
+            alignItems: 'center',
+          }}
+        >
+          <Text style={{ color: theme.red, fontSize: 12, fontWeight: '600' }}>
+            Disconnect
+          </Text>
+        </TouchableOpacity>
+
+        <Text style={{ color: theme.t6, fontSize: 11, lineHeight: 16, marginTop: 4 }}>
+          Sync pulls meetings from the last 30 days on first run, then incrementally.
+          Email-matched attendees are saved automatically. Name-only matches and unknown
+          attendees go to the review queue for you to confirm.
+        </Text>
+      </View>
+    );
+  }
+
+  // ---- Disconnected state ----
+  return (
+    <View style={{ padding: 14, gap: 10 }}>
+      <Text style={{ color: theme.t4, fontSize: 12, lineHeight: 17 }}>
+        Connect Granola to automatically pull meeting notes into your contacts' logs.
+        Requires a Granola Business plan.
+      </Text>
+      <Text style={{ color: theme.t5, fontSize: 11 }}>
+        Get a key from Granola: Settings → API → Create new key → Personal API key.
+      </Text>
+      <StyledInput
+        value={apiKey}
+        onChangeText={setApiKey}
+        placeholder="Paste your Granola API key"
+        autoCapitalize="none"
+        autoCorrect={false}
+      />
+      <TouchableOpacity
+        onPress={testAndSave}
+        disabled={testing || !apiKey.trim()}
+        style={{
+          paddingVertical: 11,
+          borderRadius: 12,
+          backgroundColor: theme.ac,
+          alignItems: 'center',
+          opacity: testing || !apiKey.trim() ? 0.5 : 1,
+        }}
+      >
+        {testing ? (
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+            <ActivityIndicator color="#fff" size="small" />
+            <Text style={{ color: '#fff', fontSize: 13, fontWeight: '700' }}>
+              Testing...
+            </Text>
+          </View>
+        ) : (
+          <Text style={{ color: '#fff', fontSize: 13, fontWeight: '700' }}>
+            Connect
+          </Text>
+        )}
+      </TouchableOpacity>
+    </View>
+  );
+}
+
 function SettingsSection({ icon, title, subtitle, open, onPress, children }) {
   const { theme } = useTheme();
   return (
@@ -485,149 +865,341 @@ function DataRow({ icon, label, onPress }) {
   );
 }
 
+// =================== Tags Manager ===================
+
 function TagsManager({ customTags, hiddenTags, onSaveCustom, onSaveHidden }) {
   const { theme } = useTheme();
+  const [openCat, setOpenCat] = useState(null);
   const [adding, setAdding] = useState(false);
   const [val, setVal] = useState('');
-  const all = [...DEFAULT_TAGS, ...customTags];
 
-  function add() {
-    if (!val.trim() || all.includes(val.trim())) return;
-    onSaveCustom([...customTags, val.trim()]);
+  const allMasterLabels = MASTER_TAGS.map((t) => t.label);
+  const commonGroup = {
+    key: 'common',
+    label: 'Common Tags',
+    tags: COMMON_TAG_LABELS.filter((l) => allMasterLabels.includes(l)),
+  };
+  const masterGroups = SUBCATEGORIES.map((sc) => ({
+    key: sc.key,
+    label: sc.label,
+    tags: MASTER_TAGS.filter((t) => t.subcategory === sc.key).map((t) => t.label),
+  })).filter((g) => g.tags.length > 0);
+
+  const sections = [commonGroup, ...masterGroups];
+
+  function toggleCat(k) {
+    setOpenCat(openCat === k ? null : k);
+  }
+
+  function toggleHide(label) {
+    if (hiddenTags.includes(label)) {
+      onSaveHidden(hiddenTags.filter((x) => x !== label));
+    } else {
+      onSaveHidden([...hiddenTags, label]);
+    }
+  }
+
+  function bulkSet(sectionTags, hide) {
+    if (hide) {
+      const toAdd = sectionTags.filter((t) => !hiddenTags.includes(t));
+      onSaveHidden([...hiddenTags, ...toAdd]);
+    } else {
+      const next = hiddenTags.filter((t) => !sectionTags.includes(t));
+      onSaveHidden(next);
+    }
+  }
+
+  function addCustom() {
+    const trimmed = val.trim();
+    if (!trimmed) return;
+    const allLabels = [...allMasterLabels, ...customTags];
+    if (allLabels.includes(trimmed)) {
+      Alert.alert('Already exists', `"${trimmed}" is already in your tag list.`);
+      return;
+    }
+    onSaveCustom([...customTags, trimmed]);
     setVal('');
     setAdding(false);
   }
 
-  function toggleHide(t) {
-    if (hiddenTags.includes(t)) onSaveHidden(hiddenTags.filter((x) => x !== t));
-    else onSaveHidden([...hiddenTags, t]);
-  }
-
-  function deleteTag(t) {
-    Alert.alert('Delete tag', 'Delete "' + t + '"?', [
+  function deleteCustom(label) {
+    Alert.alert('Delete tag', `Delete "${label}"?`, [
       { text: 'Cancel', style: 'cancel' },
       {
         text: 'Delete',
         style: 'destructive',
-        onPress: () => onSaveCustom(customTags.filter((x) => x !== t)),
+        onPress: () => onSaveCustom(customTags.filter((x) => x !== label)),
       },
     ]);
   }
 
   return (
     <View style={{ padding: 14 }}>
-      {all.map((t) => {
-        const c = getTagColor(t);
-        const hidden = hiddenTags.includes(t);
-        const isCustom = customTags.includes(t);
+      <Text style={{ fontSize: 11, color: theme.t5, marginBottom: 12, lineHeight: 16 }}>
+        Tap a tag to hide or show it. Hidden tags stay on existing contacts but won't appear
+        in the picker.
+      </Text>
+
+      {sections.map((group) => {
+        const open = openCat === group.key;
+        const hiddenInGroup = group.tags.filter((t) => hiddenTags.includes(t)).length;
+        const allHidden = hiddenInGroup === group.tags.length && group.tags.length > 0;
+        const visibleCount = group.tags.length - hiddenInGroup;
         return (
-          <View
-            key={t}
-            style={{
-              flexDirection: 'row',
-              alignItems: 'center',
-              padding: 8,
-              marginBottom: 6,
-              borderRadius: 10,
-              backgroundColor: hidden ? theme.bg3 : theme.bg5,
-              borderWidth: 1,
-              borderColor: hidden ? theme.brd : c + '40',
-              gap: 10,
-            }}
+          <CategoryBlock
+            key={group.key}
+            theme={theme}
+            label={group.label}
+            count={group.tags.length}
+            visibleCount={visibleCount}
+            open={open}
+            onToggleOpen={() => toggleCat(group.key)}
+            onBulkSet={() => bulkSet(group.tags, !allHidden)}
+            allHidden={allHidden}
           >
-            <View
-              style={{
-                width: 8,
-                height: 8,
-                borderRadius: 4,
-                backgroundColor: c,
-                opacity: hidden ? 0.3 : 1,
-              }}
-            />
-            <Text
-              style={{
-                flex: 1,
-                fontSize: 13,
-                color: hidden ? theme.t6 : c,
-                fontWeight: '600',
-                textDecorationLine: hidden ? 'line-through' : 'none',
-              }}
-            >
-              {t}
-            </Text>
-            <TouchableOpacity
-              onPress={() => toggleHide(t)}
-              style={{
-                paddingHorizontal: 10,
-                paddingVertical: 4,
-                borderRadius: 8,
-                backgroundColor: theme.bg2,
-                borderWidth: 1,
-                borderColor: theme.brd2,
-              }}
-            >
-              <Text style={{ fontSize: 10, color: theme.t4, fontWeight: '600' }}>
-                {hidden ? 'Show' : 'Hide'}
-              </Text>
-            </TouchableOpacity>
-            {isCustom && (
-              <TouchableOpacity onPress={() => deleteTag(t)} style={{ padding: 4 }}>
-                <TrashIcon size={14} color={theme.red} />
-              </TouchableOpacity>
-            )}
-          </View>
+            <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6 }}>
+              {group.tags.map((label) => (
+                <TagChip
+                  key={`${group.key}-${label}`}
+                  label={label}
+                  hidden={hiddenTags.includes(label)}
+                  onPress={() => toggleHide(label)}
+                />
+              ))}
+            </View>
+          </CategoryBlock>
         );
       })}
-      {adding ? (
-        <View style={{ flexDirection: 'row', gap: 8, marginTop: 6 }}>
-          <StyledInput
-            value={val}
-            onChangeText={setVal}
-            placeholder="New tag"
-            style={{ flex: 1 }}
-            autoFocus
-            onSubmitEditing={add}
-          />
-          <TouchableOpacity
-            onPress={add}
-            style={{
-              paddingHorizontal: 14,
-              paddingVertical: 10,
-              borderRadius: 10,
-              backgroundColor: theme.ac,
-            }}
-          >
-            <Text style={{ color: '#fff', fontSize: 12, fontWeight: '600' }}>Add</Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            onPress={() => {
-              setAdding(false);
-              setVal('');
-            }}
-            style={{ padding: 10 }}
-          >
-            <XIcon size={18} color={theme.t4} />
-          </TouchableOpacity>
+
+      <CategoryBlock
+        theme={theme}
+        label="Your Custom Tags"
+        count={customTags.length}
+        visibleCount={customTags.filter((t) => !hiddenTags.includes(t)).length}
+        open={openCat === 'custom'}
+        onToggleOpen={() => toggleCat('custom')}
+        onBulkSet={
+          customTags.length > 0
+            ? () => {
+                const allHidden =
+                  customTags.every((t) => hiddenTags.includes(t)) && customTags.length > 0;
+                bulkSet(customTags, !allHidden);
+              }
+            : null
+        }
+        allHidden={
+          customTags.length > 0 && customTags.every((t) => hiddenTags.includes(t))
+        }
+      >
+        {customTags.length === 0 && (
+          <Text style={{ fontSize: 12, color: theme.t6, marginBottom: 8 }}>
+            None yet. Add your own below.
+          </Text>
+        )}
+        <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6 }}>
+          {customTags.map((label) => (
+            <TagChip
+              key={`custom-${label}`}
+              label={label}
+              hidden={hiddenTags.includes(label)}
+              onPress={() => toggleHide(label)}
+              onDelete={() => deleteCustom(label)}
+            />
+          ))}
         </View>
-      ) : (
+        {adding ? (
+          <View style={{ flexDirection: 'row', gap: 8, marginTop: 10 }}>
+            <StyledInput
+              value={val}
+              onChangeText={setVal}
+              placeholder="New tag"
+              style={{ flex: 1 }}
+              autoFocus
+              onSubmitEditing={addCustom}
+            />
+            <TouchableOpacity
+              onPress={addCustom}
+              style={{
+                paddingHorizontal: 14,
+                paddingVertical: 10,
+                borderRadius: 10,
+                backgroundColor: theme.ac,
+              }}
+            >
+              <Text style={{ color: '#fff', fontSize: 12, fontWeight: '600' }}>Add</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              onPress={() => {
+                setAdding(false);
+                setVal('');
+              }}
+              style={{ padding: 10 }}
+            >
+              <XIcon size={18} color={theme.t4} />
+            </TouchableOpacity>
+          </View>
+        ) : (
+          <TouchableOpacity
+            onPress={() => setAdding(true)}
+            style={{
+              paddingVertical: 8,
+              paddingHorizontal: 14,
+              borderRadius: 10,
+              borderWidth: 1,
+              borderStyle: 'dashed',
+              borderColor: theme.brd2,
+              alignSelf: 'flex-start',
+              marginTop: 10,
+            }}
+          >
+            <Text style={{ color: theme.ac, fontSize: 12, fontWeight: '500' }}>
+              + Add Custom Tag
+            </Text>
+          </TouchableOpacity>
+        )}
+      </CategoryBlock>
+    </View>
+  );
+}
+
+function CategoryBlock({
+  theme,
+  label,
+  count,
+  visibleCount,
+  open,
+  onToggleOpen,
+  onBulkSet,
+  allHidden,
+  children,
+}) {
+  return (
+    <View
+      style={{
+        marginBottom: 10,
+        borderRadius: 12,
+        borderWidth: 1,
+        borderColor: theme.brd,
+        backgroundColor: theme.bg3,
+        overflow: 'hidden',
+      }}
+    >
+      <View
+        style={{
+          flexDirection: 'row',
+          alignItems: 'center',
+          paddingVertical: 12,
+          paddingHorizontal: 12,
+          gap: 10,
+        }}
+      >
         <TouchableOpacity
-          onPress={() => setAdding(true)}
+          onPress={onToggleOpen}
+          activeOpacity={0.7}
+          style={{ flex: 1, flexDirection: 'row', alignItems: 'center', gap: 8 }}
+        >
+          <View style={{ transform: [{ rotate: open ? '180deg' : '0deg' }] }}>
+            <ChevronDown size={14} color={theme.t5} />
+          </View>
+          <Text style={{ fontSize: 13, color: theme.t1, fontWeight: '600' }}>
+            {label}
+          </Text>
+          <Text style={{ fontSize: 11, color: theme.t5 }}>
+            {count > 0 ? `${visibleCount}/${count}` : '0'}
+          </Text>
+        </TouchableOpacity>
+
+        {onBulkSet && count > 0 && (
+          <TouchableOpacity
+            onPress={onBulkSet}
+            style={{
+              paddingHorizontal: 10,
+              paddingVertical: 5,
+              borderRadius: 8,
+              backgroundColor: theme.bg2,
+              borderWidth: 1,
+              borderColor: theme.brd2,
+            }}
+          >
+            <Text style={{ fontSize: 10, color: theme.t4, fontWeight: '600' }}>
+              {allHidden ? 'Show all' : 'Hide all'}
+            </Text>
+          </TouchableOpacity>
+        )}
+      </View>
+      {open && (
+        <View
           style={{
-            paddingVertical: 10,
-            borderRadius: 10,
-            borderWidth: 1,
-            borderStyle: 'dashed',
-            borderColor: theme.brd2,
-            alignItems: 'center',
-            marginTop: 6,
+            paddingHorizontal: 12,
+            paddingBottom: 12,
+            paddingTop: 4,
+            borderTopWidth: 1,
+            borderTopColor: theme.brd,
           }}
         >
-          <Text style={{ color: theme.t4, fontSize: 12, fontWeight: '500' }}>+ Add Tag</Text>
+          {children}
+        </View>
+      )}
+    </View>
+  );
+}
+
+function TagChip({ label, hidden, onPress, onDelete }) {
+  const { theme } = useTheme();
+  const c = getTagColor(label);
+  return (
+    <View
+      style={{
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 6,
+      }}
+    >
+      <TouchableOpacity
+        onPress={onPress}
+        activeOpacity={0.7}
+        style={{
+          flexDirection: 'row',
+          alignItems: 'center',
+          gap: 6,
+          paddingVertical: 6,
+          paddingHorizontal: 10,
+          borderRadius: 20,
+          borderWidth: 1,
+          backgroundColor: hidden ? theme.bg3 : c + '18',
+          borderColor: hidden ? theme.brd : c + '50',
+        }}
+      >
+        <View
+          style={{
+            width: 6,
+            height: 6,
+            borderRadius: 3,
+            backgroundColor: c,
+            opacity: hidden ? 0.3 : 1,
+          }}
+        />
+        <Text
+          style={{
+            fontSize: 12,
+            color: hidden ? theme.t6 : c,
+            fontWeight: '600',
+            textDecorationLine: hidden ? 'line-through' : 'none',
+          }}
+        >
+          {label}
+        </Text>
+      </TouchableOpacity>
+      {onDelete && (
+        <TouchableOpacity onPress={onDelete} style={{ padding: 4 }}>
+          <TrashIcon size={12} color={theme.red} />
         </TouchableOpacity>
       )}
     </View>
   );
 }
+
+// =================== Interests Manager ===================
 
 function InterestsManager({ customInterests, hiddenInterests, onSaveCustom, onSaveHidden }) {
   const { theme } = useTheme();

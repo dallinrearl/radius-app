@@ -1,15 +1,19 @@
 import { onAuthChange } from './src/lib/auth';
 import AuthScreen from './src/screens/AuthScreen';
 import 'react-native-gesture-handler';
-import React, { useState, useEffect } from 'react';
-import { View, Text, ActivityIndicator, StatusBar as RNStatusBar } from 'react-native';
+import React, { useState, useEffect, useRef } from 'react';
+import { View, Text, ActivityIndicator, Alert } from 'react-native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { StatusBar } from 'expo-status-bar';
 import * as Font from 'expo-font';
+import * as FileSystem from 'expo-file-system';
+import * as Sharing from 'expo-sharing';
 
 import { ThemeProvider, useTheme } from './src/styles/theme';
 import { useAppStore } from './src/hooks/useAppStore';
+import { runGranolaSync, shouldRunBackgroundSync } from './src/utils/granolaSync';
 import NavBar from './src/components/NavBar';
 import { Toast } from './src/components/Common';
 import LogTouchpointModal from './src/components/LogTouchpointModal';
@@ -24,6 +28,9 @@ import AddScreen from './src/screens/AddScreen';
 import OnboardingScreen from './src/screens/OnboardingScreen';
 import LockScreen from './src/screens/LockScreen';
 import SecurityScreen from './src/screens/SecurityScreen';
+import MailingListsScreen from './src/screens/MailingListsScreen';
+import MailingListDetailScreen from './src/screens/MailingListDetailScreen';
+import ReviewQueueScreen from './src/screens/ReviewQueueScreen';
 
 import { addDays, isoToday } from './src/utils/helpers';
 import { EMPTY_CONTACT } from './src/constants';
@@ -47,15 +54,73 @@ import {
   Karla_700Bold,
 } from '@expo-google-fonts/karla';
 
+function csvEscape(s) {
+  if (s == null) return '';
+  const str = String(s);
+  if (/[",\r\n]/.test(str)) {
+    return '"' + str.replace(/"/g, '""') + '"';
+  }
+  return str;
+}
+
+function csvRow(fields) {
+  return fields.map(csvEscape).join(',');
+}
+
+function buildMailingListCsv(list, contactsOnList) {
+  const overrides = list.addressOverrides || {};
+  const header = csvRow([
+    'Recipient Name',
+    'Address Line 1',
+    'Address Line 2',
+    'City',
+    'State',
+    'ZIP',
+    'Country',
+  ]);
+  const rows = [];
+  let skipped = 0;
+  for (const c of contactsOnList) {
+    const addresses = Array.isArray(c.addresses) ? c.addresses : [];
+    if (addresses.length === 0) {
+      skipped++;
+      continue;
+    }
+    const idx = typeof overrides[c.id] === 'number' ? overrides[c.id] : 0;
+    const addr = addresses[idx] || addresses[0];
+    const recipient = (c.recipientName && c.recipientName.trim()) || c.name || '';
+    rows.push(
+      csvRow([
+        recipient,
+        addr.line1 || '',
+        addr.line2 || '',
+        addr.city || '',
+        addr.state || '',
+        addr.zip || '',
+        addr.country || '',
+      ]),
+    );
+  }
+  return {
+    csv: [header, ...rows].join('\r\n'),
+    rowCount: rows.length,
+    skipped,
+  };
+}
+
 function AppInner() {
   const { theme, themeName } = useTheme();
   const store = useAppStore();
   const [tab, setTab] = useState('contacts');
-  const [view, setView] = useState('list'); // list | detail | edit | edit_mycard | add | security
-  const [addMode, setAddMode] = useState(null); // null | manual | voice | card | import | receive | share
+  const [view, setView] = useState('list');
+  const [addMode, setAddMode] = useState(null);
   const [selected, setSelected] = useState(null);
   const [editForm, setEditForm] = useState(null);
   const [editFlash, setEditFlash] = useState(false);
+  // When set, Cancel/Save on the contact form returns to this view instead
+  // of the default routing. Used so that creating a contact from the
+  // review queue returns the user to the review queue, not the contacts list.
+  const [formReturnView, setFormReturnView] = useState(null);
   const [dupeWarn, setDupeWarn] = useState(null);
   const [forceSavePending, setForceSavePending] = useState(false);
   const [toast, setToast] = useState(null);
@@ -63,14 +128,14 @@ function AppInner() {
   const [locked, setLocked] = useState(false);
   const [user, setUser] = useState(null);
   const [authChecked, setAuthChecked] = useState(false);
+  const [selectedListId, setSelectedListId] = useState(null);
 
-  // PIN gating on launch
   useEffect(() => {
     if (store.loaded && store.pin) {
       setLocked(true);
     }
   }, [store.loaded, store.pin]);
-  // Auth state on launch + listen for changes
+
   useEffect(() => {
     const subscription = onAuthChange((u) => {
       setUser(u);
@@ -79,19 +144,58 @@ function AppInner() {
     return () => subscription?.unsubscribe();
   }, []);
 
+  // Silent background sync once per app session, throttled to once per
+  // 30 minutes via the lastSync timestamp. Fires when the user is loaded
+  // in, signed in, unlocked, and has connected Granola.
+  const autoSyncRanRef = useRef(false);
+  useEffect(() => {
+    if (autoSyncRanRef.current) return;
+    if (!store.loaded) return;
+    if (!user) return;
+    if (locked) return;
+    if (!store.onboarded) return;
+    if (!store.contacts) return;
+
+    autoSyncRanRef.current = true;
+    (async () => {
+      try {
+        const apiKey = await AsyncStorage.getItem('crm-granola-key');
+        if (!apiKey) return;
+
+        const should = await shouldRunBackgroundSync(30);
+        if (!should) return;
+
+        const result = await runGranolaSync({
+          apiKey,
+          contacts: store.contacts,
+          myCard: store.myCard,
+          onProgress: () => {}, // silent
+          onCommit: store.commit,
+          addToReviewQueue: store.addToReviewQueue,
+        });
+
+        // Only show toast if anything actually happened
+        if (result.hadAnything) {
+          showToast('Granola: ' + result.summary, theme.ac);
+        }
+      } catch (e) {
+        console.warn('Background Granola sync skipped:', e?.message);
+        // Silent failure — do not bother the user
+      }
+    })();
+  }, [store.loaded, user, locked, store.onboarded, store.contacts, store.myCard, store.commit, store.addToReviewQueue, theme.ac]);
+
   function showToast(msg, color) {
     setToast({ msg, color });
     setTimeout(() => setToast(null), 2200);
   }
 
-  // === Contact CRUD ===
   function commitContact(updated, skipDupeCheck) {
     const exists = store.contacts.find((c) => c.id === updated.id);
     let next;
     if (exists) {
       next = store.contacts.map((c) => (c.id === updated.id ? updated : c));
     } else {
-      // New: dupe check
       if (!skipDupeCheck) {
         const dupe = store.contacts.find(
           (c) =>
@@ -115,11 +219,17 @@ function AppInner() {
   function saveCurrentForm() {
     const ok = commitContact(editForm, forceSavePending);
     if (ok) {
+      const returnTo = formReturnView;
       setEditForm(null);
       setEditFlash(false);
       setForceSavePending(false);
-      setView('list');
-      setSelected(null);
+      setFormReturnView(null);
+      if (returnTo) {
+        setView(returnTo);
+      } else {
+        setView('list');
+        setSelected(null);
+      }
       showToast(editForm.id ? 'Saved' : 'Contact added');
     }
   }
@@ -128,11 +238,17 @@ function AppInner() {
     setForceSavePending(true);
     const ok = commitContact(editForm, true);
     if (ok) {
+      const returnTo = formReturnView;
       setEditForm(null);
       setEditFlash(false);
       setForceSavePending(false);
-      setView('list');
-      setSelected(null);
+      setFormReturnView(null);
+      if (returnTo) {
+        setView(returnTo);
+      } else {
+        setView('list');
+        setSelected(null);
+      }
       showToast('Contact added');
     }
   }
@@ -159,6 +275,14 @@ function AppInner() {
   function updateContact(updated) {
     store.commit(store.contacts.map((c) => (c.id === updated.id ? updated : c)));
     if (selected?.id === updated.id) setSelected(updated);
+  }
+
+  // Wrapper around store.toggleContactOnList that also keeps the
+  // currently-selected contact in sync (so the detail screen reflects
+  // the change immediately).
+  function toggleContactOnListLocal(contact, listId) {
+    const updated = store.toggleContactOnList(contact, listId);
+    if (selected?.id === contact.id) setSelected(updated);
   }
 
   function snoozeContact(c, daysCount) {
@@ -194,7 +318,58 @@ function AppInner() {
     showToast('Logged with ' + c.name);
   }
 
-  // === Render gating ===
+  // Open the review queue screen.
+  function openReviewQueue() {
+    setView('review_queue');
+  }
+
+  // From a queue item, jump into the contact form pre-filled with the
+  // attendee's name + email so the user can finish creating them. The
+  // queue item is left in place; user can come back and confirm against
+  // the new contact (which now has the email, so a future sync will match
+  // automatically anyway).
+  function createContactFromAttendee(item) {
+    const att = item?.attendee || {};
+    const prefill = {
+      ...EMPTY_CONTACT,
+      name: att.name || '',
+      email: att.email || '',
+    };
+    if (att.email) {
+      prefill.emails = [{ label: 'Personal', value: att.email }];
+    }
+    setEditForm(prefill);
+    setEditFlash(true);
+    setFormReturnView('review_queue');
+    setView('edit');
+  }
+
+  async function exportMailingList(list, contactsOnList) {
+    try {
+      const { csv, rowCount, skipped } = buildMailingListCsv(list, contactsOnList);
+      if (rowCount === 0) {
+        Alert.alert(
+          'Nothing to export',
+          skipped > 0
+            ? `All ${skipped} contact${skipped === 1 ? '' : 's'} on this list are missing an address.`
+            : 'This list is empty.',
+        );
+        return;
+      }
+      const filename =
+        (list.name || 'mailing_list').replace(/[^a-zA-Z0-9]+/g, '_').toLowerCase() + '.csv';
+      const path = FileSystem.cacheDirectory + filename;
+      await FileSystem.writeAsStringAsync(path, '\uFEFF' + csv);
+      if (await Sharing.isAvailableAsync()) {
+        await Sharing.shareAsync(path, { mimeType: 'text/csv' });
+      }
+      const skipText = skipped > 0 ? ` ${skipped} skipped (no address).` : '';
+      showToast(`Exported ${rowCount} contact${rowCount === 1 ? '' : 's'}.${skipText}`);
+    } catch (e) {
+      Alert.alert('Export failed', e.message);
+    }
+  }
+
   if (!store.loaded) {
     return (
       <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: theme.bg }}>
@@ -203,7 +378,6 @@ function AppInner() {
     );
   }
 
-  // Auth gate: must sign in before anything else
   if (!authChecked) {
     return (
       <View style={{ flex: 1, backgroundColor: theme.bg, justifyContent: 'center', alignItems: 'center' }}>
@@ -232,7 +406,6 @@ function AppInner() {
     return <LockScreen pin={store.pin} onUnlock={() => setLocked(false)} />;
   }
 
-  // === Sub-views ===
   if (view === 'detail' && selected) {
     return (
       <View style={{ flex: 1, backgroundColor: theme.bg }}>
@@ -250,6 +423,8 @@ function AppInner() {
           onArchive={() => archiveContact(selected)}
           onDelete={() => deleteContact(selected)}
           showToast={showToast}
+          mailingLists={store.mailingLists}
+          onToggleContactOnList={toggleContactOnListLocal}
         />
         <Toast toast={toast} />
       </View>
@@ -264,11 +439,18 @@ function AppInner() {
           onSave={saveCurrentForm}
           onForceSave={forceSave}
           onCancel={() => {
+            const returnTo = formReturnView;
             setEditForm(null);
             setEditFlash(false);
             setDupeWarn(null);
-            if (selected) setView('detail');
-            else setView('list');
+            setFormReturnView(null);
+            if (returnTo) {
+              setView(returnTo);
+            } else if (selected) {
+              setView('detail');
+            } else {
+              setView('list');
+            }
           }}
           title={editForm.id ? 'Edit Contact' : 'Add Contact'}
           flash={editFlash}
@@ -278,6 +460,7 @@ function AppInner() {
           onAddTag={store.addCustomTag}
           allInterests={store.visibleInterests}
           onAddInterest={store.addCustomInterest}
+          mailingLists={store.mailingLists}
         />
         <Toast toast={toast} />
       </View>
@@ -307,6 +490,7 @@ function AppInner() {
           onAddTag={store.addCustomTag}
           allInterests={store.visibleInterests}
           onAddInterest={store.addCustomInterest}
+          mailingLists={store.mailingLists}
           isMyCard
         />
         <Toast toast={toast} />
@@ -334,10 +518,75 @@ function AppInner() {
     );
   }
 
-  // === Add flow ===
+  if (view === 'mailing_lists') {
+    return (
+      <View style={{ flex: 1 }}>
+        <MailingListsScreen
+          mailingLists={store.mailingLists}
+          contacts={store.contacts}
+          onCreateList={store.createMailingList}
+          onRenameList={store.renameMailingList}
+          onDeleteList={store.deleteMailingList}
+          onPickList={(list) => {
+            setSelectedListId(list.id);
+            setView('mailing_list_detail');
+          }}
+          onBack={() => setView('list')}
+        />
+        <Toast toast={toast} />
+      </View>
+    );
+  }
+
+  if (view === 'mailing_list_detail') {
+    const list = store.mailingLists.find((l) => l.id === selectedListId);
+    return (
+      <View style={{ flex: 1 }}>
+        <MailingListDetailScreen
+          mailingList={list}
+          contacts={store.contacts}
+          onSetAddressOverride={store.setAddressOverride}
+          onRemoveFromList={(contact) => store.toggleContactOnList(contact, selectedListId)}
+          onPickContact={(c) => {
+            setSelected(c);
+            setView('detail');
+          }}
+          onExport={exportMailingList}
+          onBack={() => {
+            setSelectedListId(null);
+            setView('mailing_lists');
+          }}
+        />
+        <Toast toast={toast} />
+      </View>
+    );
+  }
+
+  if (view === 'review_queue') {
+    return (
+      <View style={{ flex: 1 }}>
+        <ReviewQueueScreen
+          reviewQueue={store.reviewQueue}
+          contacts={store.contacts}
+          myCard={store.myCard}
+          onCommit={store.commit}
+          onRemoveFromReviewQueue={store.removeFromReviewQueue}
+          onPatchReviewQueueItem={store.patchReviewQueueItem}
+          onCreateContactFromAttendee={createContactFromAttendee}
+          onBack={() => {
+            setView('list');
+            setTab('settings');
+          }}
+          showToast={showToast}
+        />
+        <Toast toast={toast} />
+      </View>
+    );
+  }
+
   if (tab === 'add') {
     if (addMode === 'manual' || (addMode && addMode !== 'voice' && addMode !== 'card' && addMode !== 'import' && addMode !== 'receive' && addMode !== 'share' && view === 'edit')) {
-      return null; // handled above
+      return null;
     }
     return (
       <View style={{ flex: 1, backgroundColor: theme.bg }}>
@@ -375,7 +624,6 @@ function AppInner() {
     );
   }
 
-  // === Main tabbed views ===
   return (
     <View style={{ flex: 1, backgroundColor: theme.bg }}>
       {tab === 'contacts' && (
@@ -392,6 +640,12 @@ function AppInner() {
           onLogTouch={openLogModal}
           onLogToday={logToday}
           showToast={showToast}
+          samplesBannerDismissed={store.samplesBannerDismissed}
+          onClearSamples={store.clearSampleContacts}
+          onDismissSamplesBanner={store.dismissSamplesBanner}
+          contactsFetchError={store.contactsFetchError}
+          contactsFetching={store.contactsFetching}
+          onRefetchContacts={store.refetchContacts}
         />
       )}
       {tab === 'nextup' && (
@@ -435,8 +689,15 @@ function AppInner() {
             setView('detail');
           }}
           onSecurityPress={() => setView('security')}
+          onMailingListsPress={() => setView('mailing_lists')}
+          mailingLists={store.mailingLists}
           onReplayWalkthrough={store.resetOnboarding}
           showToast={showToast}
+          reviewQueue={store.reviewQueue}
+          onAddToReviewQueue={store.addToReviewQueue}
+          onRemoveFromReviewQueue={store.removeFromReviewQueue}
+          onClearReviewQueue={store.clearReviewQueue}
+          onOpenReviewQueue={openReviewQueue}
         />
       )}
 

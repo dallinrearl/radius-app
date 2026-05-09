@@ -2,57 +2,35 @@ import React, { useState, useRef } from 'react';
 import {
   View,
   Text,
-  ScrollView,
   TouchableOpacity,
   Animated,
-  Dimensions,
   PanResponder,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useTheme } from '../styles/theme';
 import { PrimaryButton } from '../components/Common';
-import {
-  UsersIcon,
-  CalendarIcon,
-  ChartIcon,
-  HeartIcon,
-  CardIcon,
-} from '../components/Icons';
 import ContactForm from '../components/ContactForm';
 import { EMPTY_CONTACT } from '../constants';
 
-const { width } = Dimensions.get('window');
+const TOTAL_STEPS = 5;
 
 const SLIDES = [
   {
-    icon: UsersIcon,
-    title: 'Welcome to Radius',
-    text: 'Your personal CRM for the relationships that matter.',
-    color: '#3B6EE6',
+    label: 'WELCOME',
+    headline: 'Welcome to Radius.',
+    body: 'A personal relationship manager for the people who matter most.',
   },
   {
-    icon: CalendarIcon,
-    title: 'Stay on Schedule',
-    text: 'Set follow-up cadences. Get nudged before relationships go cold.',
-    color: '#48B8E0',
+    label: 'ALWAYS-ON ASSISTANT',
+    headline: 'Make people your priority.',
+    body:
+      'AI helps you remember, follow up, and stay close, without it ever feeling like work.',
   },
   {
-    icon: HeartIcon,
-    title: 'Remember the Details',
-    text: 'Capture personal details, conversation notes, and shared interests.',
-    color: '#E060A0',
-  },
-  {
-    icon: ChartIcon,
-    title: 'See Your Network',
-    text: 'Visualize your relationships, activity, and growth over time.',
-    color: '#7B5EEA',
-  },
-  {
-    icon: CardIcon,
-    title: 'Capture Anywhere',
-    text: 'Scan business cards, dictate voice notes, or share QR codes.',
-    color: '#00C9A7',
+    label: 'THE DETAILS THAT MATTER',
+    headline: 'Remember the details.',
+    body:
+      "Their kids' names, what they care about, what you talked about last. So they feel how much they matter to you.",
   },
 ];
 
@@ -68,9 +46,13 @@ export default function OnboardingScreen({
 }) {
   const { theme } = useTheme();
   const insets = useSafeAreaInsets();
-  const [step, setStep] = useState(0);
-  const [showCardForm, setShowCardForm] = useState(false);
+
+  const [phase, setPhase] = useState('use_type');
+  const [slideIndex, setSlideIndex] = useState(0);
+  const [useType, setUseType] = useState([]);
+  const [samplesRequested, setSamplesRequested] = useState(null);
   const [form, setForm] = useState(myCard || { ...EMPTY_CONTACT });
+
   const tx = useRef(new Animated.Value(0)).current;
 
   const pan = useRef(
@@ -79,29 +61,70 @@ export default function OnboardingScreen({
         Math.abs(g.dx) > 12 && Math.abs(g.dx) > Math.abs(g.dy),
       onPanResponderMove: (_, g) => tx.setValue(g.dx),
       onPanResponderRelease: (_, g) => {
-        if (g.dx < -50 && step < SLIDES.length) {
-          setStep(step + 1);
-          tx.setValue(0);
-        } else if (g.dx > 50 && step > 0) {
-          setStep(step - 1);
-          tx.setValue(0);
-        } else {
-          Animated.spring(tx, { toValue: 0, useNativeDriver: true }).start();
-        }
+        if (g.dx < -50) advanceSlide();
+        else if (g.dx > 50) goBackSlide();
+        else Animated.spring(tx, { toValue: 0, useNativeDriver: true }).start();
       },
     }),
   ).current;
 
-  if (showCardForm) {
+  function advanceSlide() {
+    if (slideIndex < SLIDES.length - 1) {
+      setSlideIndex(slideIndex + 1);
+      tx.setValue(0);
+    } else {
+      setPhase('card_intro');
+      tx.setValue(0);
+    }
+  }
+  function goBackSlide() {
+    if (slideIndex > 0) {
+      setSlideIndex(slideIndex - 1);
+      tx.setValue(0);
+    } else {
+      setPhase('use_type');
+      tx.setValue(0);
+    }
+  }
+
+  function toggleUseType(value) {
+    setUseType((prev) =>
+      prev.includes(value) ? prev.filter((v) => v !== value) : [...prev, value],
+    );
+  }
+
+  function finishOnboarding(samplesChoice) {
+    const finalSamples =
+      typeof samplesChoice === 'boolean' ? samplesChoice : samplesRequested;
+    onFinish({
+      useType,
+      samplesRequested: finalSamples,
+    });
+  }
+
+  function currentStepNumber() {
+    if (phase === 'use_type') return 1;
+    if (phase === 'slides') return 2 + slideIndex;
+    if (phase === 'card_intro') return 5;
+    return null;
+  }
+
+  const stepNum = currentStepNumber();
+
+  // ---- Phase: card_form ----
+  // Pass onSkip so the ContactForm renders a Skip button next to Save.
+  // Skipping jumps directly to the samples phase without saving the card.
+  if (phase === 'card_form') {
     return (
       <ContactForm
         form={form}
         setForm={setForm}
         onSave={() => {
           onSaveMyCard(form);
-          onFinish();
+          setPhase('samples');
         }}
-        onCancel={() => setShowCardForm(false)}
+        onCancel={() => setPhase('card_intro')}
+        onSkip={() => setPhase('samples')}
         title="Set Up Your Card"
         contacts={contacts}
         allTags={allTags}
@@ -113,174 +136,362 @@ export default function OnboardingScreen({
     );
   }
 
-  if (step >= SLIDES.length) {
+  if (phase === 'samples') {
     return (
-      <View
-        style={{
-          flex: 1,
-          backgroundColor: theme.bg,
-          padding: 20,
-          paddingTop: insets.top + 60,
-        }}
-      >
-        <Text
-          style={{
-            fontSize: 28,
-            color: theme.t1,
-            fontWeight: '600',
-            fontFamily: theme.fontDisplay,
-            marginBottom: 12,
-            textAlign: 'center',
-          }}
-        >
-          One More Thing
-        </Text>
-        <Text
-          style={{
-            fontSize: 14,
-            color: theme.t4,
-            textAlign: 'center',
-            marginBottom: 30,
-            paddingHorizontal: 20,
-          }}
-        >
-          Set up your own contact card so you can share it with others via QR code.
-        </Text>
-        <View
-          style={{
-            backgroundColor: theme.bg2,
-            borderRadius: 18,
-            padding: 24,
-            alignItems: 'center',
-            marginHorizontal: 20,
-            marginBottom: 30,
-          }}
-        >
-          <CardIcon size={50} color={theme.ac} strokeWidth={1.4} />
-          <Text style={{ fontSize: 16, color: theme.t1, fontWeight: '600', marginTop: 16 }}>
-            Your Digital Card
-          </Text>
-          <Text style={{ fontSize: 12, color: theme.t5, textAlign: 'center', marginTop: 8 }}>
-            Name, role, contact info, social links. You can edit it anytime in Settings.
-          </Text>
+      <Shell theme={theme} insets={insets} showProgress={false}>
+        <View style={{ flex: 1, justifyContent: 'center' }}>
+          <StepLabel theme={theme} text="ALMOST THERE" />
+          <Headline theme={theme} text="Want a few sample contacts?" />
+          <Body
+            theme={theme}
+            text="We can drop in two examples so you can see how Radius works. Clear them anytime."
+          />
         </View>
-        <View style={{ paddingHorizontal: 20, gap: 10 }}>
-          <PrimaryButton onPress={() => setShowCardForm(true)} label="Set Up My Card" />
-          <TouchableOpacity onPress={onFinish} style={{ alignItems: 'center', paddingVertical: 12 }}>
-            <Text style={{ color: theme.t5, fontSize: 13 }}>Skip for now</Text>
-          </TouchableOpacity>
-        </View>
-      </View>
+        <Footer
+          theme={theme}
+          primaryLabel="Add sample contacts"
+          onPrimary={() => {
+            setSamplesRequested(true);
+            finishOnboarding(true);
+          }}
+          secondaryLabel="Start with a blank slate"
+          onSecondary={() => {
+            setSamplesRequested(false);
+            finishOnboarding(false);
+          }}
+        />
+      </Shell>
     );
   }
 
-  const current = SLIDES[step];
-  const Icon = current.icon;
-
   return (
-    <View style={{ flex: 1, backgroundColor: theme.bg }} {...pan.panHandlers}>
-      <View
-        style={{
-          flex: 1,
-          alignItems: 'center',
-          justifyContent: 'center',
-          paddingTop: insets.top,
-          paddingHorizontal: 30,
-        }}
-      >
-        <Animated.View style={{ alignItems: 'center', transform: [{ translateX: tx }] }}>
-          <View
-            style={{
-              width: 100,
-              height: 100,
-              borderRadius: 50,
-              backgroundColor: current.color + '22',
-              alignItems: 'center',
-              justifyContent: 'center',
-              marginBottom: 30,
-            }}
-          >
-            <Icon size={48} color={current.color} strokeWidth={1.5} />
-          </View>
-          <Text
-            style={{
-              fontSize: 28,
-              color: theme.t1,
-              fontWeight: '600',
-              fontFamily: theme.fontDisplay,
-              textAlign: 'center',
-              marginBottom: 14,
-            }}
-          >
-            {current.title}
-          </Text>
-          <Text
-            style={{
-              fontSize: 15,
-              color: theme.t4,
-              textAlign: 'center',
-              lineHeight: 22,
-              maxWidth: 320,
-            }}
-          >
-            {current.text}
-          </Text>
-        </Animated.View>
-      </View>
+    <Shell
+      theme={theme}
+      insets={insets}
+      showProgress
+      stepNum={stepNum}
+      totalSteps={TOTAL_STEPS}
+      panHandlers={phase === 'slides' ? pan.panHandlers : undefined}
+    >
+      {phase === 'use_type' && (
+        <UseTypePhase
+          theme={theme}
+          stepNum={stepNum}
+          useType={useType}
+          toggleUseType={toggleUseType}
+        />
+      )}
 
-      {/* Dots */}
-      <View
-        style={{
-          flexDirection: 'row',
-          justifyContent: 'center',
-          gap: 6,
-          marginBottom: 24,
-        }}
-      >
-        {SLIDES.map((_, i) => (
-          <View
-            key={i}
-            style={{
-              width: i === step ? 18 : 6,
-              height: 6,
-              borderRadius: 3,
-              backgroundColor: i === step ? current.color : theme.brd2,
-            }}
-          />
-        ))}
-      </View>
+      {phase === 'slides' && (
+        <SlidePhase
+          theme={theme}
+          slide={SLIDES[slideIndex]}
+          tx={tx}
+        />
+      )}
 
-      {/* Buttons */}
-      <View
-        style={{
-          flexDirection: 'row',
-          gap: 12,
-          padding: 20,
-          paddingBottom: insets.bottom + 20,
-        }}
-      >
-        {step > 0 && (
-          <TouchableOpacity
-            onPress={() => setStep(step - 1)}
-            style={{
-              flex: 1,
-              paddingVertical: 14,
-              borderRadius: 14,
-              borderWidth: 1,
-              borderColor: theme.brd2,
-              alignItems: 'center',
-            }}
-          >
-            <Text style={{ color: theme.t4, fontSize: 14, fontWeight: '600' }}>Back</Text>
-          </TouchableOpacity>
-        )}
-        <View style={{ flex: 2 }}>
-          <PrimaryButton
-            onPress={() => setStep(step + 1)}
-            label={step === SLIDES.length - 1 ? 'Get Started' : 'Continue'}
-          />
+      {phase === 'card_intro' && <CardIntroPhase theme={theme} />}
+
+      {phase === 'use_type' && (
+        <Footer
+          theme={theme}
+          primaryLabel="Continue"
+          primaryDisabled={useType.length === 0}
+          onPrimary={() => {
+            if (useType.length > 0) setPhase('slides');
+          }}
+        />
+      )}
+
+      {phase === 'slides' && (
+        <Footer
+          theme={theme}
+          primaryLabel="Continue"
+          onPrimary={advanceSlide}
+          showBack
+          onBack={goBackSlide}
+        />
+      )}
+
+      {phase === 'card_intro' && (
+        <Footer
+          theme={theme}
+          primaryLabel="Set Up My Card"
+          onPrimary={() => setPhase('card_form')}
+          secondaryLabel="Skip for now"
+          onSecondary={() => setPhase('samples')}
+        />
+      )}
+    </Shell>
+  );
+}
+
+function Shell({
+  theme,
+  insets,
+  showProgress,
+  stepNum,
+  totalSteps,
+  panHandlers,
+  children,
+}) {
+  return (
+    <View
+      style={{
+        flex: 1,
+        backgroundColor: theme.bg,
+        paddingTop: insets.top + 24,
+        paddingBottom: insets.bottom + 24,
+        paddingHorizontal: 28,
+      }}
+      {...(panHandlers || {})}
+    >
+      {showProgress && (
+        <View style={{ flexDirection: 'row', gap: 6, marginBottom: 64 }}>
+          {Array.from({ length: totalSteps }).map((_, i) => (
+            <View
+              key={i}
+              style={{
+                flex: 1,
+                height: 3,
+                borderRadius: 2,
+                backgroundColor: i < stepNum ? theme.ac : theme.brd2,
+              }}
+            />
+          ))}
         </View>
+      )}
+      {!showProgress && <View style={{ height: 24 }} />}
+      {children}
+    </View>
+  );
+}
+
+function UseTypePhase({ theme, stepNum, useType, toggleUseType }) {
+  return (
+    <View style={{ flex: 1, justifyContent: 'center', maxWidth: 560 }}>
+      <StepLabel theme={theme} text={`${pad(stepNum)} — HOW YOU'LL USE IT`} />
+      <Headline theme={theme} text="How will you use Radius?" />
+      <Body
+        theme={theme}
+        text="Pick one or both. We'll tailor the tags and prompts to fit how you connect."
+      />
+
+      <View style={{ marginTop: 32, gap: 10 }}>
+        <UseTypeOption
+          theme={theme}
+          label="Personal"
+          description="Family, friends, neighbors, the people in your life."
+          selected={useType.includes('personal')}
+          onPress={() => toggleUseType('personal')}
+        />
+        <UseTypeOption
+          theme={theme}
+          label="Professional"
+          description="Colleagues, clients, mentors, and your network."
+          selected={useType.includes('professional')}
+          onPress={() => toggleUseType('professional')}
+        />
       </View>
     </View>
   );
+}
+
+function SlidePhase({ theme, slide, tx }) {
+  return (
+    <Animated.View
+      style={{
+        flex: 1,
+        justifyContent: 'center',
+        maxWidth: 560,
+        transform: [{ translateX: tx }],
+      }}
+    >
+      <StepLabel theme={theme} text={slide.label} />
+      <Headline theme={theme} text={slide.headline} />
+      <Body theme={theme} text={slide.body} />
+    </Animated.View>
+  );
+}
+
+function CardIntroPhase({ theme }) {
+  return (
+    <View style={{ flex: 1, justifyContent: 'center', maxWidth: 560 }}>
+      <StepLabel theme={theme} text="05 — YOUR CARD" />
+      <Headline theme={theme} text="Set up your card." />
+      <Body
+        theme={theme}
+        text="Name, role, contact info. Share it with a tap, by QR code, link, or as a contact file. You can edit it anytime."
+      />
+    </View>
+  );
+}
+
+function StepLabel({ theme, text }) {
+  return (
+    <Text
+      style={{
+        fontSize: 12,
+        color: theme.t5,
+        fontFamily: theme.fontBodySemi,
+        letterSpacing: 1.5,
+        marginBottom: 28,
+      }}
+    >
+      {text}
+    </Text>
+  );
+}
+
+function Headline({ theme, text }) {
+  return (
+    <Text
+      style={{
+        fontSize: 40,
+        color: theme.t1,
+        fontFamily: theme.fontDisplay,
+        lineHeight: 46,
+        letterSpacing: -0.5,
+        marginBottom: 20,
+      }}
+    >
+      {text}
+    </Text>
+  );
+}
+
+function Body({ theme, text }) {
+  return (
+    <Text
+      style={{
+        fontSize: 16,
+        color: theme.t4,
+        lineHeight: 24,
+        fontFamily: theme.fontBody,
+        maxWidth: 420,
+      }}
+    >
+      {text}
+    </Text>
+  );
+}
+
+function Footer({
+  theme,
+  primaryLabel,
+  onPrimary,
+  primaryDisabled,
+  secondaryLabel,
+  onSecondary,
+  showBack,
+  onBack,
+}) {
+  return (
+    <View style={{ gap: 14 }}>
+      <View style={{ opacity: primaryDisabled ? 0.4 : 1 }}>
+        <PrimaryButton
+          onPress={() => {
+            if (!primaryDisabled) onPrimary?.();
+          }}
+          label={primaryLabel}
+        />
+      </View>
+
+      {(secondaryLabel || showBack) && (
+        <View
+          style={{
+            flexDirection: 'row',
+            justifyContent: 'center',
+            gap: 24,
+            paddingVertical: 4,
+          }}
+        >
+          {showBack && (
+            <TouchableOpacity onPress={onBack} style={{ paddingVertical: 6 }}>
+              <Text
+                style={{
+                  color: theme.t5,
+                  fontSize: 13,
+                  fontFamily: theme.fontBody,
+                }}
+              >
+                Back
+              </Text>
+            </TouchableOpacity>
+          )}
+          {secondaryLabel && (
+            <TouchableOpacity onPress={onSecondary} style={{ paddingVertical: 6 }}>
+              <Text
+                style={{
+                  color: theme.t5,
+                  fontSize: 13,
+                  fontFamily: theme.fontBody,
+                }}
+              >
+                {secondaryLabel}
+              </Text>
+            </TouchableOpacity>
+          )}
+        </View>
+      )}
+    </View>
+  );
+}
+
+function UseTypeOption({ theme, label, description, selected, onPress }) {
+  return (
+    <TouchableOpacity
+      onPress={onPress}
+      activeOpacity={0.85}
+      style={{
+        borderRadius: 12,
+        borderWidth: 1,
+        borderColor: selected ? theme.ac : theme.brd2,
+        backgroundColor: selected ? theme.bgAc : theme.bg2,
+        paddingVertical: 18,
+        paddingHorizontal: 18,
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 14,
+      }}
+    >
+      <View
+        style={{
+          width: 20,
+          height: 20,
+          borderRadius: 4,
+          borderWidth: 1.5,
+          borderColor: selected ? theme.ac : theme.brd2,
+          backgroundColor: selected ? theme.ac : 'transparent',
+          alignItems: 'center',
+          justifyContent: 'center',
+        }}
+      >
+        {selected && (
+          <Text style={{ color: theme.bg, fontSize: 12, fontWeight: '700', lineHeight: 14 }}>
+            ✓
+          </Text>
+        )}
+      </View>
+      <View style={{ flex: 1 }}>
+        <Text
+          style={{
+            fontSize: 16,
+            color: theme.t1,
+            fontFamily: theme.fontBodySemi,
+            marginBottom: 2,
+          }}
+        >
+          {label}
+        </Text>
+        <Text style={{ fontSize: 13, color: theme.t4, lineHeight: 18, fontFamily: theme.fontBody }}>
+          {description}
+        </Text>
+      </View>
+    </TouchableOpacity>
+  );
+}
+
+function pad(n) {
+  return String(n).padStart(2, '0');
 }

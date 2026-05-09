@@ -20,7 +20,7 @@ function fromDb(row) {
     priority: row.is_vip || false,
     photo: row.photo_url || '',
     archived: row.archived || false,
-    // Fields stored inside the extra JSON blob
+    // Fields stored inside the extra JSON blob.
     linkedin: extra.linkedin || '',
     topics: extra.topics || '',
     birthday: extra.birthday || '',
@@ -29,11 +29,20 @@ function fromDb(row) {
     hometown: extra.hometown || '',
     married: extra.married ?? null,
     spouseName: extra.spouseName || '',
+    anniversary: extra.anniversary || '',
     kids: extra.kids || [],
     interests: extra.interests || [],
     experience: extra.experience || '',
     pastCompanies: extra.pastCompanies || [],
     convLog: extra.convLog || [],
+    // New multi-entry contact info + mailing list fields.
+    phones: Array.isArray(extra.phones) ? extra.phones : [],
+    emails: Array.isArray(extra.emails) ? extra.emails : [],
+    addresses: Array.isArray(extra.addresses) ? extra.addresses : [],
+    recipientName: extra.recipientName || '',
+    mailingLists: Array.isArray(extra.mailingLists) ? extra.mailingLists : [],
+    isSample: extra.isSample || false,
+    sampleAddedAt: extra.sampleAddedAt || null,
   };
 }
 
@@ -64,14 +73,23 @@ function toDb(contact, userId) {
       hometown: contact.hometown || '',
       married: contact.married ?? null,
       spouseName: contact.spouseName || '',
+      anniversary: contact.anniversary || '',
       kids: contact.kids || [],
       interests: contact.interests || [],
       experience: contact.experience || '',
       pastCompanies: contact.pastCompanies || [],
       convLog: contact.convLog || [],
+      // New fields.
+      phones: Array.isArray(contact.phones) ? contact.phones : [],
+      emails: Array.isArray(contact.emails) ? contact.emails : [],
+      addresses: Array.isArray(contact.addresses) ? contact.addresses : [],
+      recipientName: contact.recipientName || '',
+      mailingLists: Array.isArray(contact.mailingLists) ? contact.mailingLists : [],
+      isSample: !!contact.isSample,
+      sampleAddedAt: contact.sampleAddedAt || null,
     },
   };
-  // Only include id if it's a real UUID (existing record)
+  // Only include id if it's a real UUID (existing record).
   // Skip local sample IDs like 's1', 's2' etc.
   if (contact.id && contact.id.length > 10) {
     row.id = contact.id;
@@ -79,7 +97,9 @@ function toDb(contact, userId) {
   return row;
 }
 
-// Fetch all contacts for the current user
+// Fetch all contacts for the current user.
+// Throws on error so callers can distinguish "user has zero contacts"
+// (returns []) from "fetch failed" (throws).
 export async function fetchContacts() {
   const { data, error } = await supabase
     .from('contacts')
@@ -87,7 +107,7 @@ export async function fetchContacts() {
     .order('created_at', { ascending: false });
   if (error) {
     console.error('fetchContacts error:', error);
-    return [];
+    throw new Error(error.message || 'Failed to fetch contacts');
   }
   return (data || []).map(fromDb);
 }
@@ -135,6 +155,12 @@ export async function syncContacts(localContacts, userId) {
   }
 
   // 4. Re-fetch so caller has fresh data with real DB IDs
-  const fresh = await fetchContacts();
-  return { ok: true, contacts: fresh };
+  try {
+    const fresh = await fetchContacts();
+    return { ok: true, contacts: fresh };
+  } catch (e) {
+    // Sync wrote successfully but post-fetch failed. Surface as soft error.
+    console.warn('syncContacts post-fetch failed:', e?.message);
+    return { ok: true, contacts: null };
+  }
 }

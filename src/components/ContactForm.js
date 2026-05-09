@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect } from 'react';
 import {
   View,
   Text,
@@ -10,7 +10,16 @@ import {
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useTheme } from '../styles/theme';
-import { FREQ, TIMEZONES } from '../constants';
+import {
+  FREQ,
+  TIMEZONES,
+  PHONE_LABELS,
+  EMAIL_LABELS,
+  ADDRESS_LABELS,
+  emptyPhone,
+  emptyEmail,
+  emptyAddress,
+} from '../constants';
 import { fmtPhone, fmtDate, nextDate, daysUntil, makeVcf } from '../utils/helpers';
 import {
   Section,
@@ -26,12 +35,21 @@ import { DownloadIcon, XIcon } from './Icons';
 import * as FileSystem from 'expo-file-system';
 import * as Sharing from 'expo-sharing';
 
+function moveItem(arr, from, to) {
+  if (to < 0 || to >= arr.length) return arr;
+  const next = [...arr];
+  const [item] = next.splice(from, 1);
+  next.splice(to, 0, item);
+  return next;
+}
+
 export default function ContactForm({
   form,
   setForm,
   onSave,
   onForceSave,
   onCancel,
+  onSkip,
   title,
   flash,
   dupeWarn,
@@ -40,12 +58,97 @@ export default function ContactForm({
   onAddTag,
   allInterests,
   onAddInterest,
+  mailingLists,
   isMyCard,
 }) {
   const { theme } = useTheme();
   const insets = useSafeAreaInsets();
   const nd = nextDate(form.lastContacted, form.freq);
   const ndDiff = nd ? daysUntil(nd) : null;
+
+  // ---------- One-time form normalization on open ----------
+  useEffect(() => {
+    setForm((f) => {
+      const next = { ...f };
+      let changed = false;
+
+      if (!Array.isArray(next.phones)) {
+        next.phones = [];
+        changed = true;
+      }
+      if (next.phones.length === 0) {
+        if (typeof next.phone === 'string' && next.phone.trim()) {
+          next.phones = [{ label: 'Cell', value: next.phone.trim() }];
+        } else {
+          next.phones = [emptyPhone()];
+        }
+        changed = true;
+      }
+
+      if (!Array.isArray(next.emails)) {
+        next.emails = [];
+        changed = true;
+      }
+      if (next.emails.length === 0) {
+        if (typeof next.email === 'string' && next.email.trim()) {
+          next.emails = [{ label: 'Personal', value: next.email.trim() }];
+        } else {
+          next.emails = [emptyEmail()];
+        }
+        changed = true;
+      }
+
+      if (!Array.isArray(next.addresses)) {
+        next.addresses = [];
+        changed = true;
+      }
+      if (!next.id && next.addresses.length === 0) {
+        next.addresses = [emptyAddress()];
+        changed = true;
+      }
+
+      if (!Array.isArray(next.mailingLists)) {
+        next.mailingLists = [];
+        changed = true;
+      }
+
+      return changed ? next : f;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [form?.id]);
+
+  const phones = Array.isArray(form.phones) ? form.phones : [];
+  const emails = Array.isArray(form.emails) ? form.emails : [];
+  const addresses = Array.isArray(form.addresses) ? form.addresses : [];
+  const formMailingLists = Array.isArray(form.mailingLists) ? form.mailingLists : [];
+  const availableLists = Array.isArray(mailingLists) ? mailingLists : [];
+
+  function updatePhones(next) {
+    setForm((f) => ({
+      ...f,
+      phones: next,
+      phone: next[0]?.value || '',
+    }));
+  }
+  function updateEmails(next) {
+    setForm((f) => ({
+      ...f,
+      emails: next,
+      email: next[0]?.value || '',
+    }));
+  }
+  function updateAddresses(next) {
+    setForm((f) => ({ ...f, addresses: next }));
+  }
+  function toggleMailingList(listId) {
+    setForm((f) => {
+      const current = Array.isArray(f.mailingLists) ? f.mailingLists : [];
+      const next = current.includes(listId)
+        ? current.filter((x) => x !== listId)
+        : [...current, listId];
+      return { ...f, mailingLists: next };
+    });
+  }
 
   async function exportVcf() {
     try {
@@ -165,23 +268,56 @@ export default function ContactForm({
 
         {/* Contact Info */}
         <Section label="Contact Info">
-          <Field label="Phone">
-            <StyledInput
-              value={form.phone}
-              onChangeText={(v) => setForm((f) => ({ ...f, phone: fmtPhone(v) }))}
-              placeholder="(801) 555-1234"
-              keyboardType="phone-pad"
+          <Field label="Phones">
+            {phones.map((p, i) => (
+              <PhoneRow
+                key={`phone-${i}`}
+                theme={theme}
+                phone={p}
+                index={i}
+                count={phones.length}
+                onChange={(next) => {
+                  const arr = [...phones];
+                  arr[i] = next;
+                  updatePhones(arr);
+                }}
+                onRemove={() => updatePhones(phones.filter((_, j) => j !== i))}
+                onMoveUp={() => updatePhones(moveItem(phones, i, i - 1))}
+                onMoveDown={() => updatePhones(moveItem(phones, i, i + 1))}
+              />
+            ))}
+            <AddRowButton
+              theme={theme}
+              label="+ Add another phone"
+              onPress={() => updatePhones([...phones, emptyPhone()])}
             />
           </Field>
-          <Field label="Email">
-            <StyledInput
-              value={form.email}
-              onChangeText={(v) => setForm((f) => ({ ...f, email: v }))}
-              placeholder="email@example.com"
-              keyboardType="email-address"
-              autoCapitalize="none"
+
+          <Field label="Emails">
+            {emails.map((e, i) => (
+              <EmailRow
+                key={`email-${i}`}
+                theme={theme}
+                email={e}
+                index={i}
+                count={emails.length}
+                onChange={(next) => {
+                  const arr = [...emails];
+                  arr[i] = next;
+                  updateEmails(arr);
+                }}
+                onRemove={() => updateEmails(emails.filter((_, j) => j !== i))}
+                onMoveUp={() => updateEmails(moveItem(emails, i, i - 1))}
+                onMoveDown={() => updateEmails(moveItem(emails, i, i + 1))}
+              />
+            ))}
+            <AddRowButton
+              theme={theme}
+              label="+ Add another email"
+              onPress={() => updateEmails([...emails, emptyEmail()])}
             />
           </Field>
+
           <Field label="LinkedIn">
             <StyledInput
               value={form.linkedin || ''}
@@ -191,6 +327,83 @@ export default function ContactForm({
             />
           </Field>
         </Section>
+
+        {/* Addresses */}
+        <Section label="Addresses">
+          {addresses.map((a, i) => (
+            <AddressRow
+              key={`addr-${i}`}
+              theme={theme}
+              address={a}
+              index={i}
+              count={addresses.length}
+              onChange={(next) => {
+                const arr = [...addresses];
+                arr[i] = next;
+                updateAddresses(arr);
+              }}
+              onRemove={() => updateAddresses(addresses.filter((_, j) => j !== i))}
+              onMoveUp={() => updateAddresses(moveItem(addresses, i, i - 1))}
+              onMoveDown={() => updateAddresses(moveItem(addresses, i, i + 1))}
+            />
+          ))}
+          <AddRowButton
+            theme={theme}
+            label={addresses.length === 0 ? '+ Add address' : '+ Add another address'}
+            onPress={() => updateAddresses([...addresses, emptyAddress()])}
+          />
+
+          {addresses.length > 0 && (
+            <Field label="Recipient Name (for mailing labels)">
+              <StyledInput
+                value={form.recipientName || ''}
+                onChangeText={(v) => setForm((f) => ({ ...f, recipientName: v }))}
+                placeholder={form.name ? `Defaults to "${form.name}"` : 'e.g. The Smith Family'}
+              />
+            </Field>
+          )}
+        </Section>
+
+        {/* Mailing Lists */}
+        {!isMyCard && availableLists.length > 0 && (
+          <Section label="Mailing Lists">
+            <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6 }}>
+              {availableLists.map((list) => {
+                const on = formMailingLists.includes(list.id);
+                return (
+                  <TouchableOpacity
+                    key={list.id}
+                    onPress={() => toggleMailingList(list.id)}
+                    activeOpacity={0.7}
+                    style={{
+                      paddingHorizontal: 12,
+                      paddingVertical: 8,
+                      borderRadius: 20,
+                      borderWidth: 1,
+                      backgroundColor: on ? theme.bgAc : theme.bg2,
+                      borderColor: on ? theme.ac : theme.brd2,
+                    }}
+                  >
+                    <Text
+                      style={{
+                        fontSize: 12,
+                        color: on ? theme.ac : theme.t4,
+                        fontWeight: '600',
+                      }}
+                    >
+                      {list.name}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+            {addresses.length === 0 && formMailingLists.length > 0 && (
+              <Text style={{ fontSize: 11, color: theme.warn, marginTop: 10, fontStyle: 'italic' }}>
+                Add an address above so this contact can be exported on the mailing label.
+              </Text>
+            )}
+          </Section>
+        )}
 
         {/* Context (skipped on My Card) */}
         {!isMyCard && (
@@ -419,11 +632,11 @@ export default function ContactForm({
               })}
             </View>
           </Field>
-          <Field label="Birthday (YYYY-MM-DD)">
+          <Field label="Birthday">
             <StyledInput
               value={form.birthday || ''}
               onChangeText={(v) => setForm((f) => ({ ...f, birthday: v }))}
-              placeholder="2000-01-15"
+              placeholder="YYYY-MM-DD or MM-DD"
             />
           </Field>
           <Field label="Marital Status">
@@ -462,13 +675,22 @@ export default function ContactForm({
             </View>
           </Field>
           {form.married === 'married' && (
-            <Field label="Spouse's Name">
-              <StyledInput
-                value={form.spouseName || ''}
-                onChangeText={(v) => setForm((f) => ({ ...f, spouseName: v }))}
-                placeholder="e.g. Jessica"
-              />
-            </Field>
+            <>
+              <Field label="Spouse's Name">
+                <StyledInput
+                  value={form.spouseName || ''}
+                  onChangeText={(v) => setForm((f) => ({ ...f, spouseName: v }))}
+                  placeholder="e.g. Jessica"
+                />
+              </Field>
+              <Field label="Anniversary">
+                <StyledInput
+                  value={form.anniversary || ''}
+                  onChangeText={(v) => setForm((f) => ({ ...f, anniversary: v }))}
+                  placeholder="YYYY-MM-DD or MM-DD"
+                />
+              </Field>
+            </>
           )}
           <Field label="Kids">
             {(form.kids || []).map((k, i) => (
@@ -640,7 +862,7 @@ export default function ContactForm({
         )}
       </ScrollView>
 
-      {/* Floating Save Button */}
+      {/* Bottom action bar. If onSkip is provided, render Save + Skip side by side. */}
       <View
         style={{
           position: 'absolute',
@@ -650,10 +872,308 @@ export default function ContactForm({
           padding: 16,
           paddingBottom: 16 + insets.bottom,
           backgroundColor: theme.bg + 'F0',
+          flexDirection: 'row',
+          gap: 10,
         }}
       >
-        <PrimaryButton onPress={onSave} label="Save Contact" />
+        <View style={{ flex: onSkip ? 2 : 1 }}>
+          <PrimaryButton onPress={onSave} label="Save Contact" />
+        </View>
+        {onSkip && (
+          <TouchableOpacity
+            onPress={onSkip}
+            activeOpacity={0.7}
+            style={{
+              flex: 1,
+              paddingVertical: 14,
+              borderRadius: 14,
+              borderWidth: 1,
+              borderColor: theme.brd2,
+              backgroundColor: theme.bg2,
+              alignItems: 'center',
+              justifyContent: 'center',
+            }}
+          >
+            <Text style={{ color: theme.t4, fontSize: 14, fontWeight: '600' }}>Skip</Text>
+          </TouchableOpacity>
+        )}
       </View>
     </KeyboardAvoidingView>
+  );
+}
+
+// =================== Sub-components ===================
+
+function LabelPicker({ theme, value, presets, onChange }) {
+  const isPresetMatch = presets.includes(value);
+  const showCustomInput = !isPresetMatch || value === 'Other';
+
+  return (
+    <View>
+      <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6 }}>
+        {presets.map((p) => {
+          const on = value === p || (!isPresetMatch && p === 'Other');
+          return (
+            <TouchableOpacity
+              key={p}
+              onPress={() => onChange(p === 'Other' ? '' : p)}
+              style={{
+                paddingHorizontal: 10,
+                paddingVertical: 6,
+                borderRadius: 8,
+                borderWidth: 1,
+                backgroundColor: on ? theme.bgAc : theme.bg2,
+                borderColor: on ? theme.ac : theme.brd2,
+              }}
+            >
+              <Text
+                style={{
+                  fontSize: 11,
+                  color: on ? theme.ac : theme.t5,
+                  fontWeight: '600',
+                }}
+              >
+                {p}
+              </Text>
+            </TouchableOpacity>
+          );
+        })}
+      </View>
+      {showCustomInput && (
+        <View style={{ marginTop: 8 }}>
+          <StyledInput
+            value={isPresetMatch ? '' : value}
+            onChangeText={onChange}
+            placeholder="Custom label (e.g. Beach House)"
+          />
+        </View>
+      )}
+    </View>
+  );
+}
+
+function RowControls({ theme, index, count, onMoveUp, onMoveDown, onRemove }) {
+  const upDisabled = index === 0;
+  const downDisabled = index === count - 1;
+  return (
+    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, marginLeft: 8 }}>
+      <TouchableOpacity
+        onPress={onMoveUp}
+        disabled={upDisabled}
+        style={{
+          opacity: upDisabled ? 0.3 : 1,
+          paddingHorizontal: 8,
+          paddingVertical: 4,
+        }}
+      >
+        <Text style={{ color: theme.t4, fontSize: 14 }}>▲</Text>
+      </TouchableOpacity>
+      <TouchableOpacity
+        onPress={onMoveDown}
+        disabled={downDisabled}
+        style={{
+          opacity: downDisabled ? 0.3 : 1,
+          paddingHorizontal: 8,
+          paddingVertical: 4,
+        }}
+      >
+        <Text style={{ color: theme.t4, fontSize: 14 }}>▼</Text>
+      </TouchableOpacity>
+      <TouchableOpacity onPress={onRemove} style={{ padding: 4 }}>
+        <XIcon size={18} color={theme.red} />
+      </TouchableOpacity>
+    </View>
+  );
+}
+
+function AddRowButton({ theme, label, onPress }) {
+  return (
+    <TouchableOpacity
+      onPress={onPress}
+      style={{
+        paddingVertical: 8,
+        paddingHorizontal: 16,
+        borderRadius: 12,
+        borderWidth: 1,
+        borderStyle: 'dashed',
+        borderColor: theme.brd2,
+        alignSelf: 'flex-start',
+        marginTop: 4,
+      }}
+    >
+      <Text style={{ color: theme.ac, fontSize: 12, fontWeight: '500' }}>{label}</Text>
+    </TouchableOpacity>
+  );
+}
+
+function PhoneRow({ theme, phone, index, count, onChange, onRemove, onMoveUp, onMoveDown }) {
+  const isPrimary = index === 0 && count > 1;
+  return (
+    <View
+      style={{
+        borderRadius: 12,
+        borderWidth: 1,
+        borderColor: theme.brd2,
+        backgroundColor: theme.bg2,
+        padding: 12,
+        marginBottom: 8,
+      }}
+    >
+      <View style={{ flexDirection: 'row', alignItems: 'flex-start' }}>
+        <View style={{ flex: 1 }}>
+          <LabelPicker
+            theme={theme}
+            value={phone.label || ''}
+            presets={PHONE_LABELS}
+            onChange={(v) => onChange({ ...phone, label: v })}
+          />
+        </View>
+        <RowControls
+          theme={theme}
+          index={index}
+          count={count}
+          onMoveUp={onMoveUp}
+          onMoveDown={onMoveDown}
+          onRemove={onRemove}
+        />
+      </View>
+      <View style={{ marginTop: 8 }}>
+        <StyledInput
+          value={phone.value || ''}
+          onChangeText={(v) => onChange({ ...phone, value: fmtPhone(v) })}
+          placeholder="(801) 555-1234"
+          keyboardType="phone-pad"
+        />
+      </View>
+      {isPrimary && (
+        <Text style={{ fontSize: 10, color: theme.t5, marginTop: 6 }}>Primary</Text>
+      )}
+    </View>
+  );
+}
+
+function EmailRow({ theme, email, index, count, onChange, onRemove, onMoveUp, onMoveDown }) {
+  const isPrimary = index === 0 && count > 1;
+  return (
+    <View
+      style={{
+        borderRadius: 12,
+        borderWidth: 1,
+        borderColor: theme.brd2,
+        backgroundColor: theme.bg2,
+        padding: 12,
+        marginBottom: 8,
+      }}
+    >
+      <View style={{ flexDirection: 'row', alignItems: 'flex-start' }}>
+        <View style={{ flex: 1 }}>
+          <LabelPicker
+            theme={theme}
+            value={email.label || ''}
+            presets={EMAIL_LABELS}
+            onChange={(v) => onChange({ ...email, label: v })}
+          />
+        </View>
+        <RowControls
+          theme={theme}
+          index={index}
+          count={count}
+          onMoveUp={onMoveUp}
+          onMoveDown={onMoveDown}
+          onRemove={onRemove}
+        />
+      </View>
+      <View style={{ marginTop: 8 }}>
+        <StyledInput
+          value={email.value || ''}
+          onChangeText={(v) => onChange({ ...email, value: v })}
+          placeholder="email@example.com"
+          keyboardType="email-address"
+          autoCapitalize="none"
+        />
+      </View>
+      {isPrimary && (
+        <Text style={{ fontSize: 10, color: theme.t5, marginTop: 6 }}>Primary</Text>
+      )}
+    </View>
+  );
+}
+
+function AddressRow({ theme, address, index, count, onChange, onRemove, onMoveUp, onMoveDown }) {
+  const isPrimary = index === 0 && count > 1;
+  const update = (k, v) => onChange({ ...address, [k]: v });
+  return (
+    <View
+      style={{
+        borderRadius: 12,
+        borderWidth: 1,
+        borderColor: theme.brd2,
+        backgroundColor: theme.bg2,
+        padding: 12,
+        marginBottom: 8,
+      }}
+    >
+      <View style={{ flexDirection: 'row', alignItems: 'flex-start' }}>
+        <View style={{ flex: 1 }}>
+          <LabelPicker
+            theme={theme}
+            value={address.label || ''}
+            presets={ADDRESS_LABELS}
+            onChange={(v) => update('label', v)}
+          />
+        </View>
+        <RowControls
+          theme={theme}
+          index={index}
+          count={count}
+          onMoveUp={onMoveUp}
+          onMoveDown={onMoveDown}
+          onRemove={onRemove}
+        />
+      </View>
+      <View style={{ marginTop: 8, gap: 8 }}>
+        <StyledInput
+          value={address.line1 || ''}
+          onChangeText={(v) => update('line1', v)}
+          placeholder="Address line 1"
+        />
+        <StyledInput
+          value={address.line2 || ''}
+          onChangeText={(v) => update('line2', v)}
+          placeholder="Address line 2 (apt, suite, etc.)"
+        />
+        <View style={{ flexDirection: 'row', gap: 8 }}>
+          <StyledInput
+            value={address.city || ''}
+            onChangeText={(v) => update('city', v)}
+            placeholder="City"
+            style={{ flex: 2 }}
+          />
+          <StyledInput
+            value={address.state || ''}
+            onChangeText={(v) => update('state', v)}
+            placeholder="State"
+            style={{ flex: 1 }}
+          />
+        </View>
+        <View style={{ flexDirection: 'row', gap: 8 }}>
+          <StyledInput
+            value={address.zip || ''}
+            onChangeText={(v) => update('zip', v)}
+            placeholder="ZIP"
+            style={{ flex: 1 }}
+          />
+          <StyledInput
+            value={address.country || ''}
+            onChangeText={(v) => update('country', v)}
+            placeholder="Country"
+            style={{ flex: 2 }}
+          />
+        </View>
+      </View>
+      {isPrimary && (
+        <Text style={{ fontSize: 10, color: theme.t5, marginTop: 6 }}>Primary</Text>
+      )}
+    </View>
   );
 }

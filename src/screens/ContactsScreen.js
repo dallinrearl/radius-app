@@ -6,11 +6,12 @@ import {
   TouchableOpacity,
   Alert,
   TextInput,
+  ActivityIndicator,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useTheme } from '../styles/theme';
 import { Avatar, StrengthDot, TagPill } from '../components/Common';
-import { BellIcon, FilterIcon, ChevronDown, UsersIcon } from '../components/Icons';
+import { BellIcon, FilterIcon, ChevronDown, UsersIcon, XIcon } from '../components/Icons';
 import SwipeDeleteCard from '../components/SwipeDeleteCard';
 import {
   nextDate,
@@ -20,6 +21,8 @@ import {
   daysSince,
   fmtDate,
 } from '../utils/helpers';
+
+const SAMPLE_BANNER_DAYS = 7;
 
 export default function ContactsScreen({
   contacts,
@@ -31,6 +34,12 @@ export default function ContactsScreen({
   onLogTouch,
   onLogToday,
   showToast,
+  samplesBannerDismissed,
+  onClearSamples,
+  onDismissSamplesBanner,
+  contactsFetchError,
+  contactsFetching,
+  onRefetchContacts,
 }) {
   const { theme } = useTheme();
   const insets = useSafeAreaInsets();
@@ -41,6 +50,49 @@ export default function ContactsScreen({
   const [contactView, setContactView] = useState('individual');
   const [expandedCos, setExpandedCos] = useState({});
   const [showInbox, setShowInbox] = useState(false);
+
+  // ---------- Sample banner visibility ----------
+  // Show if: any active contact is a sample AND its sampleAddedAt is 7+
+  // days ago AND the user hasn't dismissed the banner.
+  const sampleContacts = useMemo(
+    () => activeContacts.filter((c) => c.isSample),
+    [activeContacts],
+  );
+  const oldestSampleAge = useMemo(() => {
+    if (sampleContacts.length === 0) return null;
+    let oldest = null;
+    for (const c of sampleContacts) {
+      const ts = c.sampleAddedAt ? Date.parse(c.sampleAddedAt) : null;
+      if (ts && (oldest === null || ts < oldest)) oldest = ts;
+    }
+    if (oldest === null) return null;
+    const ms = Date.now() - oldest;
+    return Math.floor(ms / (1000 * 60 * 60 * 24));
+  }, [sampleContacts]);
+  const showSampleBanner =
+    sampleContacts.length > 0 &&
+    !samplesBannerDismissed &&
+    oldestSampleAge !== null &&
+    oldestSampleAge >= SAMPLE_BANNER_DAYS;
+
+  function handleClearSamples() {
+    const count = sampleContacts.length;
+    Alert.alert(
+      'Clear sample contacts',
+      `Remove ${count} sample contact${count === 1 ? '' : 's'}? This can't be undone.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Clear',
+          style: 'destructive',
+          onPress: () => {
+            onClearSamples();
+            showToast && showToast('Sample contacts removed');
+          },
+        },
+      ],
+    );
+  }
 
   const filtered = useMemo(() => {
     return activeContacts
@@ -79,7 +131,6 @@ export default function ContactsScreen({
 
   return (
     <View style={{ flex: 1, backgroundColor: theme.bg }}>
-      {/* Header */}
       <View
         style={{
           paddingTop: insets.top + 12,
@@ -142,7 +193,6 @@ export default function ContactsScreen({
               </View>
             )}
           </TouchableOpacity>
-          {/* Toggle */}
           <View
             style={{
               flexDirection: 'row',
@@ -182,7 +232,6 @@ export default function ContactsScreen({
         </View>
       </View>
 
-      {/* Notification Inbox */}
       {showInbox && (
         <NotificationInbox
           contacts={activeContacts}
@@ -199,6 +248,96 @@ export default function ContactsScreen({
         contentContainerStyle={{ padding: 20, paddingBottom: 120 }}
         keyboardShouldPersistTaps="handled"
       >
+        {/* Fetch error banner. Shown when Supabase is unreachable so the
+            user knows their data isn't gone, just temporarily unavailable. */}
+        {contactsFetchError ? (
+          <View
+            style={{
+              backgroundColor: theme.bgWarn,
+              borderWidth: 1,
+              borderColor: theme.brdWarn,
+              borderRadius: 14,
+              padding: 14,
+              marginBottom: 14,
+              flexDirection: 'row',
+              alignItems: 'center',
+              gap: 10,
+            }}
+          >
+            <View style={{ flex: 1 }}>
+              <Text
+                style={{ fontSize: 13, color: theme.warn, fontWeight: '700', marginBottom: 3 }}
+              >
+                Couldn't load contacts
+              </Text>
+              <Text style={{ fontSize: 11, color: theme.t3, lineHeight: 16 }}>
+                Your data is safe. We just couldn't reach the server. Check your connection and try again.
+              </Text>
+            </View>
+            <TouchableOpacity
+              onPress={() => onRefetchContacts && onRefetchContacts()}
+              disabled={contactsFetching}
+              style={{
+                paddingHorizontal: 12,
+                paddingVertical: 7,
+                borderRadius: 10,
+                backgroundColor: theme.warn,
+                opacity: contactsFetching ? 0.5 : 1,
+                flexDirection: 'row',
+                alignItems: 'center',
+                gap: 6,
+              }}
+            >
+              {contactsFetching ? (
+                <ActivityIndicator color="#fff" size="small" />
+              ) : null}
+              <Text style={{ color: '#fff', fontSize: 11, fontWeight: '700' }}>
+                {contactsFetching ? 'Retrying...' : 'Retry'}
+              </Text>
+            </TouchableOpacity>
+          </View>
+        ) : null}
+
+        {/* Sample cleanup banner */}
+        {showSampleBanner && (
+          <View
+            style={{
+              backgroundColor: theme.bgAc,
+              borderWidth: 1,
+              borderColor: theme.brdAc,
+              borderRadius: 14,
+              padding: 14,
+              marginBottom: 14,
+              flexDirection: 'row',
+              alignItems: 'center',
+              gap: 10,
+            }}
+          >
+            <View style={{ flex: 1 }}>
+              <Text style={{ fontSize: 13, color: theme.t1, fontWeight: '600', marginBottom: 2 }}>
+                Still trying out the samples?
+              </Text>
+              <Text style={{ fontSize: 11, color: theme.t4, lineHeight: 16 }}>
+                You can clear {sampleContacts.length === 1 ? 'the sample contact' : `${sampleContacts.length} sample contacts`} anytime.
+              </Text>
+            </View>
+            <TouchableOpacity
+              onPress={handleClearSamples}
+              style={{
+                paddingHorizontal: 12,
+                paddingVertical: 7,
+                borderRadius: 10,
+                backgroundColor: theme.ac,
+              }}
+            >
+              <Text style={{ color: '#fff', fontSize: 11, fontWeight: '700' }}>Clear</Text>
+            </TouchableOpacity>
+            <TouchableOpacity onPress={onDismissSamplesBanner} style={{ padding: 4 }}>
+              <XIcon size={16} color={theme.t5} />
+            </TouchableOpacity>
+          </View>
+        )}
+
         {/* Search + Filter Toggle */}
         <View style={{ flexDirection: 'row', gap: 8, alignItems: 'center', marginBottom: 10 }}>
           <TextInput
@@ -236,7 +375,6 @@ export default function ContactsScreen({
           </TouchableOpacity>
         </View>
 
-        {/* Filter Panel */}
         {filterOpen && (
           <View style={{ marginBottom: 12 }}>
             <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginBottom: 10 }}>
@@ -305,7 +443,6 @@ export default function ContactsScreen({
           </View>
         )}
 
-        {/* Legend */}
         <View
           style={{
             flexDirection: 'row',
@@ -325,8 +462,9 @@ export default function ContactsScreen({
           ))}
         </View>
 
-        {/* Empty state */}
-        {!filtered.length && (
+        {/* Empty state. Suppressed when there's a fetch error so we don't
+            tell the user "no contacts yet" when actually we just couldn't load. */}
+        {!filtered.length && !contactsFetchError && (
           <View style={{ alignItems: 'center', paddingVertical: 50 }}>
             <View
               style={{
@@ -359,7 +497,6 @@ export default function ContactsScreen({
           </View>
         )}
 
-        {/* Contact view */}
         {contactView === 'company'
           ? (() => {
               const groups = {};
