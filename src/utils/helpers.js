@@ -8,10 +8,38 @@ export const addDays = (iso, n) => {
   return d.toISOString().slice(0, 10);
 };
 
-export const nextDate = (lc, f) => {
-  if (!lc || !f || f === 'never') return null;
+// Returns the next scheduled contact date for a contact.
+//
+// Order of preference for the anchor date:
+//   1. lastContacted — most accurate if user has logged before
+//   2. freqStartedAt — date the frequency was first set; lets new contacts
+//      with no log history show up in Next Up
+//   3. today — graceful fallback for legacy contacts that have a frequency
+//      but no log and no freqStartedAt (predates the freqStartedAt field).
+//      Without this fallback, every contact set up before freqStartedAt was
+//      added would silently disappear from Next Up.
+//
+// Optional preferredDayOfWeek (0 = Sun, 6 = Sat) for weekly frequencies:
+// snap the result forward to that weekday so "weekly on Mondays" behaves
+// as expected, not just "+7 days from anchor."
+export const nextDate = (lc, f, freqStartedAt = null, preferredDayOfWeek = null) => {
+  if (!f || f === 'never') return null;
   const o = FREQ.find((x) => x.v === f);
-  return o && o.d ? addDays(lc, o.d) : null;
+  if (!o || !o.d) return null;
+
+  const anchor = lc || freqStartedAt || isoToday();
+
+  let candidate = addDays(anchor, o.d);
+
+  // Snap to a specific weekday for weekly cadence if requested.
+  if (f === '1week' && preferredDayOfWeek != null) {
+    const d = new Date(candidate + 'T12:00:00');
+    const currentDow = d.getDay();
+    let delta = preferredDayOfWeek - currentDow;
+    if (delta < 0) delta += 7;
+    if (delta > 0) candidate = addDays(candidate, delta);
+  }
+  return candidate;
 };
 
 export const daysSince = (iso) => {
@@ -36,6 +64,23 @@ export const fmtShort = (iso) =>
         month: 'short', day: 'numeric',
       })
     : '';
+
+// Day-of-week label/short helpers used by the weekly day picker.
+export const DAYS_OF_WEEK = [
+  { v: 0, l: 'Sunday', s: 'Sun' },
+  { v: 1, l: 'Monday', s: 'Mon' },
+  { v: 2, l: 'Tuesday', s: 'Tue' },
+  { v: 3, l: 'Wednesday', s: 'Wed' },
+  { v: 4, l: 'Thursday', s: 'Thu' },
+  { v: 5, l: 'Friday', s: 'Fri' },
+  { v: 6, l: 'Saturday', s: 'Sat' },
+];
+
+// Day-of-week (0-6) for a given iso date string.
+export function dowOf(iso) {
+  if (!iso) return null;
+  return new Date(iso.slice(0, 10) + 'T12:00:00').getDay();
+}
 
 export const initials = (n) =>
   (n || '').split(' ').map((w) => w[0] || '').join('').slice(0, 2).toUpperCase();
@@ -65,8 +110,8 @@ export function fmtPhone(v) {
   return '(' + d.slice(0, 3) + ') ' + d.slice(3, 6) + '-' + d.slice(6);
 }
 
-export function strengthColor(lc, f, theme) {
-  const nd = nextDate(lc, f);
+export function strengthColor(lc, f, theme, freqStartedAt = null, preferredDayOfWeek = null) {
+  const nd = nextDate(lc, f, freqStartedAt, preferredDayOfWeek);
   if (!nd) return theme.brd2;
   const diff = daysUntil(nd);
   if (diff < 0) return theme.red;

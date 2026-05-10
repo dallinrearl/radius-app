@@ -8,6 +8,7 @@ import {
   Alert,
   ActivityIndicator,
   Modal,
+  Platform,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useTheme } from '../styles/theme';
@@ -31,6 +32,7 @@ import {
   formatDateObject,
   displayKidAge,
   dateObjectIsEmpty,
+  DAYS_OF_WEEK,
 } from '../utils/helpers';
 import {
   FREQ,
@@ -44,6 +46,25 @@ import { aiMeetingPrep, aiBackground, aiTemplate, aiExtractMeetingNote } from '.
 import * as ImagePicker from 'expo-image-picker';
 import * as FileSystem from 'expo-file-system';
 import * as Sharing from 'expo-sharing';
+
+// Cross-platform confirm helper. Alert.alert is iOS/Android only; on web
+// it silently no-ops. window.confirm works on web. This wrapper picks the
+// right flow per platform so destructive actions actually fire.
+function confirmAction(title, message, onConfirm, confirmLabel = 'OK') {
+  if (Platform.OS === 'web') {
+    if (typeof window !== 'undefined' && window.confirm) {
+      if (window.confirm(message || title)) onConfirm();
+    } else {
+      // Fallback if window.confirm is somehow unavailable: just run.
+      onConfirm();
+    }
+    return;
+  }
+  Alert.alert(title, message, [
+    { text: 'Cancel', style: 'cancel' },
+    { text: confirmLabel, style: 'destructive', onPress: onConfirm },
+  ]);
+}
 
 export default function DetailScreen({
   contact,
@@ -64,7 +85,7 @@ export default function DetailScreen({
 
   if (!contact) return null;
 
-  const nd = nextDate(contact.lastContacted, contact.freq);
+  const nd = nextDate(contact.lastContacted, contact.freq, contact.freqStartedAt, contact.freqDayOfWeek);
   const ndDiff = nd ? daysUntil(nd) : null;
   const fl = FREQ.find((o) => o.v === contact.freq);
 
@@ -384,56 +405,9 @@ export default function DetailScreen({
           />
         )}
 
-        {/* Follow-up Schedule */}
-        {contact.freq && contact.freq !== 'never' && (
-          <View
-            style={{
-              backgroundColor: theme.bg2,
-              borderRadius: 14,
-              padding: 14,
-              marginBottom: 14,
-            }}
-          >
-            <Text
-              style={{
-                fontSize: 10,
-                fontWeight: '700',
-                color: theme.t4,
-                letterSpacing: 0.6,
-                textTransform: 'uppercase',
-                marginBottom: 10,
-              }}
-            >
-              Follow-up Schedule
-            </Text>
-            <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 4 }}>
-              <Text style={{ fontSize: 12, color: theme.t5 }}>Frequency</Text>
-              <Text style={{ fontSize: 12, color: theme.t2, fontWeight: '500' }}>
-                {fl ? fl.l : ''}
-              </Text>
-            </View>
-            {nd && (
-              <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
-                <Text style={{ fontSize: 12, color: theme.t5 }}>Next contact</Text>
-                <Text
-                  style={{
-                    fontSize: 12,
-                    fontWeight: '600',
-                    color: ndDiff < 0 ? theme.red : ndDiff <= 7 ? theme.warn : theme.ac,
-                  }}
-                >
-                  {fmtDate(nd)} (
-                  {ndDiff < 0
-                    ? Math.abs(ndDiff) + 'd overdue'
-                    : ndDiff === 0
-                      ? 'today'
-                      : ndDiff + 'd'}
-                  )
-                </Text>
-              </View>
-            )}
-          </View>
-        )}
+        {/* Follow-up Schedule — always shown. Tap to set/change frequency
+            inline without going to edit screen. */}
+        <FollowUpSchedule contact={contact} onUpdate={onUpdate} theme={theme} />
 
         {contact.topics ? (
           <DetailBlock label="Key Topics" content={contact.topics} />
@@ -615,16 +589,15 @@ export default function DetailScreen({
         <View style={{ flexDirection: 'row', gap: 8, marginTop: 8 }}>
           <TouchableOpacity
             onPress={() =>
-              Alert.alert('Archive', 'Archive ' + contact.name + '?', [
-                { text: 'Cancel', style: 'cancel' },
-                {
-                  text: 'Archive',
-                  onPress: () => {
-                    onArchive();
-                    showToast(contact.name + ' archived', theme.warn);
-                  },
+              confirmAction(
+                'Archive',
+                'Archive ' + contact.name + '?',
+                () => {
+                  onArchive();
+                  showToast(contact.name + ' archived', theme.warn);
                 },
-              ])
+                'Archive',
+              )
             }
             style={{
               flex: 1,
@@ -644,10 +617,12 @@ export default function DetailScreen({
           </TouchableOpacity>
           <TouchableOpacity
             onPress={() =>
-              Alert.alert('Delete', 'Permanently delete ' + contact.name + '? This cannot be undone.', [
-                { text: 'Cancel', style: 'cancel' },
-                { text: 'Delete', style: 'destructive', onPress: onDelete },
-              ])
+              confirmAction(
+                'Delete',
+                'Permanently delete ' + contact.name + '? This cannot be undone.',
+                onDelete,
+                'Delete',
+              )
             }
             style={{
               flex: 1,
@@ -1249,29 +1224,9 @@ function ConvLog({ contact, onUpdate, showToast, consumeAiCall }) {
         style={{
           flexDirection: 'row',
           justifyContent: 'flex-end',
-          gap: 8,
           marginBottom: 10,
-          flexWrap: 'wrap',
         }}
       >
-        <TouchableOpacity
-          onPress={() => {
-            setImporting(true);
-            setAdding(false);
-          }}
-          style={{
-            paddingHorizontal: 14,
-            paddingVertical: 5,
-            borderRadius: 10,
-            borderWidth: 1,
-            backgroundColor: theme.bg2,
-            borderColor: theme.brd2,
-          }}
-        >
-          <Text style={{ color: theme.info, fontSize: 11, fontWeight: '600' }}>
-            Import Notes
-          </Text>
-        </TouchableOpacity>
         <TouchableOpacity
           onPress={() => {
             setAdding((a) => !a);
@@ -1326,6 +1281,35 @@ function ConvLog({ contact, onUpdate, showToast, consumeAiCall }) {
               </TouchableOpacity>
             ))}
           </View>
+
+          {/* Paste Transcript: opens the AI extraction flow. Sits below the
+              touch-type row so it's clearly secondary to typing a note. */}
+          <TouchableOpacity
+            onPress={() => {
+              setImporting(true);
+              setAdding(false);
+            }}
+            style={{
+              flexDirection: 'row',
+              alignItems: 'center',
+              justifyContent: 'center',
+              gap: 6,
+              paddingVertical: 8,
+              paddingHorizontal: 12,
+              borderRadius: 10,
+              borderWidth: 1,
+              borderStyle: 'dashed',
+              borderColor: theme.brd2,
+              backgroundColor: 'transparent',
+              marginBottom: 10,
+              alignSelf: 'flex-start',
+            }}
+          >
+            <Text style={{ color: theme.info, fontSize: 11, fontWeight: '600' }}>
+              📋 Paste Transcript
+            </Text>
+          </TouchableOpacity>
+
           <TextInputBox value={note} onChangeText={setNote} placeholder="What did you discuss?" />
           <TouchableOpacity
             onPress={add}
@@ -1353,7 +1337,7 @@ function ConvLog({ contact, onUpdate, showToast, consumeAiCall }) {
 
       {log.length === 0 && !adding ? (
         <Text style={{ fontSize: 12, color: theme.t6 }}>
-          No notes yet. Tap + Add Note after a conversation, or paste a meeting transcript with Import Notes.
+          No notes yet. Tap + Add Note after a conversation, or paste a meeting transcript.
         </Text>
       ) : null}
       {log.map((e, i) => {
@@ -2131,6 +2115,280 @@ function Templates({ contact, consumeAiCall, aiRemaining, effectiveTier }) {
           {result && !loading && (
             <View style={{ backgroundColor: theme.bg3, padding: 14, borderRadius: 12 }}>
               <MarkdownText text={result} theme={theme} />
+            </View>
+          )}
+        </View>
+      )}
+    </View>
+  );
+}
+
+// FollowUpSchedule — inline frequency picker on the contact detail screen.
+// Always rendered. Two states:
+//   - Has frequency: shows current freq + next contact + day-of-week (weekly)
+//   - No frequency: shows "+ Set frequency" button + helper copy
+// Tap any value (or the Set button) to expand the inline picker.
+function FollowUpSchedule({ contact, onUpdate, theme }) {
+  const [editing, setEditing] = useState(false);
+  const freq = contact.freq;
+  const hasFreq = freq && freq !== 'never';
+  const fl = FREQ.find((o) => o.v === freq);
+  const nd = nextDate(contact.lastContacted, contact.freq, contact.freqStartedAt, contact.freqDayOfWeek);
+  const ndDiff = nd ? daysUntil(nd) : null;
+  const dayLabel =
+    contact.freqDayOfWeek != null
+      ? DAYS_OF_WEEK[contact.freqDayOfWeek]?.l
+      : null;
+
+  // Set or change the frequency. Stamps freqStartedAt the first time so
+  // the contact starts showing in Next Up immediately, and defaults
+  // freqDayOfWeek to today's day when picking weekly without a prior pick.
+  function pickFreq(v) {
+    const update = { ...contact, freq: v };
+    if (v && v !== 'never') {
+      if (!contact.freqStartedAt) update.freqStartedAt = isoToday();
+      if (v === '1week' && contact.freqDayOfWeek == null) {
+        update.freqDayOfWeek = new Date().getDay();
+      }
+    } else {
+      update.freqStartedAt = '';
+      update.freqDayOfWeek = null;
+    }
+    onUpdate(update);
+  }
+
+  function pickDay(dayValue) {
+    onUpdate({ ...contact, freqDayOfWeek: dayValue });
+  }
+
+  return (
+    <View
+      style={{
+        backgroundColor: theme.bg2,
+        borderRadius: 14,
+        padding: 14,
+        marginBottom: 14,
+      }}
+    >
+      {/* Header row: title + action button on the right */}
+      <View
+        style={{
+          flexDirection: 'row',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          marginBottom: hasFreq || editing ? 10 : 4,
+        }}
+      >
+        <Text
+          style={{
+            fontSize: 10,
+            fontWeight: '700',
+            color: theme.t4,
+            letterSpacing: 0.6,
+            textTransform: 'uppercase',
+          }}
+        >
+          Follow-up Schedule
+        </Text>
+        {!hasFreq && !editing ? (
+          <TouchableOpacity
+            onPress={() => setEditing(true)}
+            style={{
+              paddingHorizontal: 10,
+              paddingVertical: 5,
+              borderRadius: 8,
+              backgroundColor: theme.bgAc,
+              borderWidth: 1,
+              borderColor: theme.brdAc,
+            }}
+          >
+            <Text style={{ color: theme.ac, fontSize: 11, fontWeight: '600' }}>
+              + Set frequency
+            </Text>
+          </TouchableOpacity>
+        ) : hasFreq && !editing ? (
+          <TouchableOpacity
+            onPress={() => setEditing(true)}
+            style={{
+              paddingHorizontal: 8,
+              paddingVertical: 4,
+              borderRadius: 7,
+              borderWidth: 1,
+              borderColor: theme.brd2,
+              backgroundColor: theme.bg3,
+            }}
+          >
+            <Text style={{ color: theme.t4, fontSize: 10, fontWeight: '600' }}>
+              Change
+            </Text>
+          </TouchableOpacity>
+        ) : (
+          <TouchableOpacity
+            onPress={() => setEditing(false)}
+            style={{
+              paddingHorizontal: 8,
+              paddingVertical: 4,
+              borderRadius: 7,
+              borderWidth: 1,
+              borderColor: theme.brdAc,
+              backgroundColor: theme.bgAc,
+            }}
+          >
+            <Text style={{ color: theme.ac, fontSize: 10, fontWeight: '600' }}>
+              Done
+            </Text>
+          </TouchableOpacity>
+        )}
+      </View>
+
+      {/* Empty-state copy when no frequency set and not editing */}
+      {!hasFreq && !editing && (
+        <Text style={{ fontSize: 12, color: theme.t6 }}>
+          No follow-up schedule yet.
+        </Text>
+      )}
+
+      {/* Display rows when freq is set and not editing */}
+      {hasFreq && !editing && (
+        <>
+          <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 4 }}>
+            <Text style={{ fontSize: 12, color: theme.t5 }}>Frequency</Text>
+            <Text style={{ fontSize: 12, color: theme.t2, fontWeight: '500' }}>
+              {fl ? fl.l : ''}
+            </Text>
+          </View>
+          {dayLabel && (
+            <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 4 }}>
+              <Text style={{ fontSize: 12, color: theme.t5 }}>Day</Text>
+              <Text style={{ fontSize: 12, color: theme.t2, fontWeight: '500' }}>
+                {dayLabel}
+              </Text>
+            </View>
+          )}
+          {nd && (
+            <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
+              <Text style={{ fontSize: 12, color: theme.t5 }}>Next contact</Text>
+              <Text
+                style={{
+                  fontSize: 12,
+                  fontWeight: '600',
+                  color: ndDiff < 0 ? theme.red : ndDiff <= 7 ? theme.warn : theme.ac,
+                }}
+              >
+                {fmtDate(nd)} (
+                {ndDiff < 0
+                  ? Math.abs(ndDiff) + 'd overdue'
+                  : ndDiff === 0
+                    ? 'today'
+                    : ndDiff + 'd'}
+                )
+              </Text>
+            </View>
+          )}
+        </>
+      )}
+
+      {/* Inline picker when editing */}
+      {editing && (
+        <View style={{ gap: 10 }}>
+          <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6 }}>
+            {FREQ.map((o) => {
+              const on = freq === o.v;
+              return (
+                <TouchableOpacity
+                  key={o.v}
+                  onPress={() => pickFreq(o.v)}
+                  style={{
+                    paddingHorizontal: 12,
+                    paddingVertical: 7,
+                    borderRadius: 9,
+                    borderWidth: 1,
+                    backgroundColor: on ? theme.bgAc : theme.bg3,
+                    borderColor: on ? theme.ac : theme.brd,
+                  }}
+                >
+                  <Text
+                    style={{
+                      fontSize: 11,
+                      color: on ? theme.ac : theme.t4,
+                      fontWeight: '600',
+                    }}
+                  >
+                    {o.l}
+                  </Text>
+                </TouchableOpacity>
+              );
+            })}
+          </View>
+
+          {/* Day-of-week picker for weekly */}
+          {freq === '1week' && (
+            <View>
+              <Text
+                style={{
+                  fontSize: 10,
+                  fontWeight: '700',
+                  color: theme.t5,
+                  letterSpacing: 0.5,
+                  textTransform: 'uppercase',
+                  marginBottom: 6,
+                }}
+              >
+                Day of week
+              </Text>
+              <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6 }}>
+                {DAYS_OF_WEEK.map((d) => {
+                  const on = contact.freqDayOfWeek === d.v;
+                  return (
+                    <TouchableOpacity
+                      key={d.v}
+                      onPress={() => pickDay(d.v)}
+                      style={{
+                        paddingHorizontal: 10,
+                        paddingVertical: 6,
+                        borderRadius: 8,
+                        borderWidth: 1,
+                        backgroundColor: on ? theme.bgAc : theme.bg3,
+                        borderColor: on ? theme.ac : theme.brd,
+                      }}
+                    >
+                      <Text
+                        style={{
+                          fontSize: 10,
+                          color: on ? theme.ac : theme.t5,
+                          fontWeight: '600',
+                        }}
+                      >
+                        {d.s}
+                      </Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+            </View>
+          )}
+
+          {/* Show the next contact preview live so the user sees the impact */}
+          {nd && (
+            <View
+              style={{
+                paddingTop: 8,
+                borderTopWidth: 1,
+                borderTopColor: theme.brd,
+                flexDirection: 'row',
+                justifyContent: 'space-between',
+              }}
+            >
+              <Text style={{ fontSize: 11, color: theme.t5 }}>Next contact</Text>
+              <Text
+                style={{
+                  fontSize: 11,
+                  fontWeight: '600',
+                  color: ndDiff < 0 ? theme.red : ndDiff <= 7 ? theme.warn : theme.ac,
+                }}
+              >
+                {fmtDate(nd)}
+              </Text>
             </View>
           )}
         </View>

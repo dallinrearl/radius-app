@@ -7,6 +7,7 @@ import {
   Alert,
   ActivityIndicator,
   Linking,
+  Platform,
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -32,7 +33,7 @@ import {
   ChatIcon,
 } from '../components/Icons';
 import { Avatar, Toggle, StyledInput } from '../components/Common';
-import { getTagColor, makeVcf, isoToday } from '../utils/helpers';
+import { getTagColor, makeVcf } from '../utils/helpers';
 import { DEFAULT_INTERESTS } from '../constants';
 import {
   TAGS as MASTER_TAGS,
@@ -49,6 +50,22 @@ import * as Contacts from 'expo-contacts';
 const GRANOLA_KEY_STORAGE = 'crm-granola-key';
 const GRANOLA_LAST_SYNC_STORAGE = 'crm-granola-last-sync';
 const GRANOLA_PROCESSED_IDS_STORAGE = 'crm-granola-processed-ids';
+
+// Cross-platform confirm. Mirrors the pattern from DetailScreen / SwipeDeleteCard.
+function confirmAction(title, message, onConfirm, confirmLabel = 'OK') {
+  if (Platform.OS === 'web') {
+    if (typeof window !== 'undefined' && window.confirm) {
+      if (window.confirm(message || title)) onConfirm();
+    } else {
+      onConfirm();
+    }
+    return;
+  }
+  Alert.alert(title, message, [
+    { text: 'Cancel', style: 'cancel' },
+    { text: confirmLabel, style: 'destructive', onPress: onConfirm },
+  ]);
+}
 
 export default function SettingsScreen({
   myCard,
@@ -87,21 +104,18 @@ export default function SettingsScreen({
   aiRemaining,
   hasStripeCustomer,
   onShowPaywall,
+  onSignOut,
 }) {
   const { theme, themeName, toggleTheme } = useTheme();
   const insets = useSafeAreaInsets();
   const [openSection, setOpenSection] = useState(null);
-  // Tracks an in-flight call to create a Stripe billing portal session.
-  // Disables the button and shows a spinner while open.
   const [portalLoading, setPortalLoading] = useState(false);
 
   function toggleSection(s) {
     setOpenSection(openSection === s ? null : s);
   }
 
-  // Open the Stripe Customer Portal so the user can manage their subscription
-  // (cancel, update card, view invoices). Calls the Edge Function to create
-  // a portal session and opens the returned URL.
+  // ============== Subscription portal ==============
   async function openBillingPortal() {
     if (portalLoading) return;
     setPortalLoading(true);
@@ -120,6 +134,7 @@ export default function SettingsScreen({
     setPortalLoading(false);
   }
 
+  // ============== Data actions ==============
   async function importContacts() {
     const perm = await Contacts.requestPermissionsAsync();
     if (perm.status !== 'granted') {
@@ -208,6 +223,57 @@ export default function SettingsScreen({
     }
   }
 
+  // ============== Danger zone actions ==============
+  function handleDeleteAllContacts() {
+    confirmAction(
+      'Delete all contacts',
+      'This permanently deletes every contact you have. Your sample contacts and account stay. This cannot be undone.',
+      () => {
+        const samples = contacts.filter(
+          (c) => c.isSample || (typeof c.id === 'string' && c.id.startsWith('sample_')),
+        );
+        onCommit(samples);
+        showToast && showToast('All contacts deleted', theme.red);
+      },
+      'Delete all',
+    );
+  }
+
+  function handleResetApp() {
+    confirmAction(
+      'Reset app',
+      'This clears all local app data: contacts, tags, interests, mailing lists, and integration keys. Your account and any synced data on the server stay. You will be returned to the walkthrough.',
+      async () => {
+        try {
+          await AsyncStorage.clear();
+          onCommit([]);
+          showToast && showToast('App reset. Reload to continue.', theme.warn);
+        } catch (e) {
+          Alert.alert('Reset failed', e.message || 'Try again.');
+        }
+      },
+      'Reset app',
+    );
+  }
+
+  function handleSignOut() {
+    confirmAction(
+      'Sign out',
+      'You will be signed out of this device. Your data stays safe on the server.',
+      () => {
+        if (onSignOut) {
+          onSignOut();
+        } else {
+          Alert.alert(
+            'Sign out unavailable',
+            'No sign-out handler is wired up yet. Pass an onSignOut prop to SettingsScreen.',
+          );
+        }
+      },
+      'Sign out',
+    );
+  }
+
   const listsCount = Array.isArray(mailingLists) ? mailingLists.length : 0;
 
   return (
@@ -231,21 +297,11 @@ export default function SettingsScreen({
           Settings
         </Text>
 
-        {/* Subscription / tier display. Always shown, copy varies by tier. */}
-        <SubscriptionCard
-          theme={theme}
-          tier={effectiveTier}
-          trialActive={trialActive}
-          trialDaysLeft={trialDaysLeft}
-          aiCallsCount={aiCallsCount}
-          aiRemaining={aiRemaining}
-          hasStripeCustomer={hasStripeCustomer}
-          portalLoading={portalLoading}
-          onUpgrade={() => onShowPaywall && onShowPaywall('upgrade')}
-          onManage={openBillingPortal}
-        />
+        {/* ============================================================
+            ACCOUNT (profile header card — myCard + subscription)
+            ============================================================ */}
+        <SectionLabel theme={theme} text="Account" />
 
-        {/* My Card */}
         <SettingsSection
           icon={<CardIcon size={18} color={theme.ac} />}
           title="My Card"
@@ -304,7 +360,50 @@ export default function SettingsScreen({
           </View>
         </SettingsSection>
 
-        {/* Theme Toggle */}
+        <SubscriptionCard
+          theme={theme}
+          tier={effectiveTier}
+          trialActive={trialActive}
+          trialDaysLeft={trialDaysLeft}
+          aiCallsCount={aiCallsCount}
+          aiRemaining={aiRemaining}
+          hasStripeCustomer={hasStripeCustomer}
+          portalLoading={portalLoading}
+          onUpgrade={() => onShowPaywall && onShowPaywall('upgrade')}
+          onManage={openBillingPortal}
+        />
+
+        <TouchableOpacity
+          onPress={onSecurityPress}
+          style={{
+            backgroundColor: theme.bg2,
+            borderWidth: 1,
+            borderColor: theme.brd,
+            borderRadius: 14,
+            padding: 14,
+            marginBottom: 10,
+            flexDirection: 'row',
+            alignItems: 'center',
+            gap: 12,
+          }}
+        >
+          <LockIcon size={18} color={theme.warn} />
+          <View style={{ flex: 1 }}>
+            <Text style={{ color: theme.t1, fontSize: 14, fontWeight: '500' }}>
+              Account & Security
+            </Text>
+            <Text style={{ color: theme.t5, fontSize: 11, marginTop: 2 }}>
+              PIN, password, sign-in
+            </Text>
+          </View>
+          <ChevronRight size={16} color={theme.t5} />
+        </TouchableOpacity>
+
+        {/* ============================================================
+            PREFERENCES (Appearance + Notifications stub)
+            ============================================================ */}
+        <SectionLabel theme={theme} text="Preferences" />
+
         <View
           style={{
             backgroundColor: theme.bg2,
@@ -323,16 +422,27 @@ export default function SettingsScreen({
           ) : (
             <SunIcon size={18} color={theme.warn} />
           )}
-          <Text style={{ flex: 1, color: theme.t1, fontSize: 14, fontWeight: '500' }}>
-            Theme
-          </Text>
-          <Text style={{ color: theme.t5, fontSize: 12, marginRight: 4 }}>
-            {themeName === 'dark' ? 'Dark' : 'Light'}
-          </Text>
+          <View style={{ flex: 1 }}>
+            <Text style={{ color: theme.t1, fontSize: 14, fontWeight: '500' }}>Theme</Text>
+            <Text style={{ color: theme.t5, fontSize: 11, marginTop: 2 }}>
+              {themeName === 'dark' ? 'Dark' : 'Light'}
+            </Text>
+          </View>
           <Toggle value={themeName === 'dark'} onValueChange={toggleTheme} color={theme.purp} />
         </View>
 
-        {/* Tags */}
+        <ComingSoonRow
+          theme={theme}
+          icon={<RefreshIcon size={18} color={theme.info} />}
+          title="Notifications"
+          subtitle="Reminders, daily digest, birthdays"
+        />
+
+        {/* ============================================================
+            ORGANIZATION (Tags / Interests / Mailing Lists)
+            ============================================================ */}
+        <SectionLabel theme={theme} text="Organization" />
+
         <SettingsSection
           icon={<TagIcon size={18} color={theme.info} />}
           title="Tags"
@@ -348,7 +458,6 @@ export default function SettingsScreen({
           />
         </SettingsSection>
 
-        {/* Interests */}
         <SettingsSection
           icon={<HeartIcon size={18} color={theme.purp} />}
           title="Interests"
@@ -364,7 +473,6 @@ export default function SettingsScreen({
           />
         </SettingsSection>
 
-        {/* Mailing Lists */}
         <TouchableOpacity
           onPress={onMailingListsPress}
           style={{
@@ -393,13 +501,17 @@ export default function SettingsScreen({
           <ChevronRight size={16} color={theme.t5} />
         </TouchableOpacity>
 
-        {/* Integrations */}
+        {/* ============================================================
+            INTEGRATIONS (Granola only for now)
+            ============================================================ */}
+        <SectionLabel theme={theme} text="Integrations" />
+
         <SettingsSection
           icon={<ChatIcon size={18} color={theme.ac} />}
-          title="Integrations"
-          subtitle="Connect Granola for automatic meeting notes"
-          open={openSection === 'integrations'}
-          onPress={() => toggleSection('integrations')}
+          title="Granola"
+          subtitle="Pull meeting notes into contact logs"
+          open={openSection === 'granola'}
+          onPress={() => toggleSection('granola')}
         >
           <GranolaIntegration
             myCard={myCard}
@@ -410,39 +522,33 @@ export default function SettingsScreen({
             onAddToReviewQueue={onAddToReviewQueue}
             onClearReviewQueue={onClearReviewQueue}
             onOpenReviewQueue={onOpenReviewQueue}
+            granolaAiUnlocked={granolaAiUnlocked}
           />
         </SettingsSection>
 
-        {/* Security */}
-        <TouchableOpacity
-          onPress={onSecurityPress}
-          style={{
-            backgroundColor: theme.bg2,
-            borderWidth: 1,
-            borderColor: theme.brd,
-            borderRadius: 14,
-            padding: 14,
-            marginBottom: 10,
-            flexDirection: 'row',
-            alignItems: 'center',
-            gap: 12,
-          }}
-        >
-          <LockIcon size={18} color={theme.warn} />
-          <View style={{ flex: 1 }}>
-            <Text style={{ color: theme.t1, fontSize: 14, fontWeight: '500' }}>Security</Text>
-            <Text style={{ color: theme.t5, fontSize: 11, marginTop: 2 }}>
-              PIN, password, and account info
-            </Text>
-          </View>
-          <ChevronRight size={16} color={theme.t5} />
-        </TouchableOpacity>
+        <ComingSoonRow
+          theme={theme}
+          icon={<RefreshIcon size={18} color={theme.t5} />}
+          title="Calendar"
+          subtitle="Sync with Google or iCloud"
+        />
 
-        {/* Data */}
+        <ComingSoonRow
+          theme={theme}
+          icon={<UsersIcon size={18} color={theme.t5} />}
+          title="Business Card Scanner"
+          subtitle="Snap a card, get a contact (Pro)"
+        />
+
+        {/* ============================================================
+            DATA
+            ============================================================ */}
+        <SectionLabel theme={theme} text="Data" />
+
         <SettingsSection
           icon={<DownloadIcon size={18} color={theme.ac} />}
-          title="Data"
-          subtitle="Import, export, backup"
+          title="Import & Export"
+          subtitle="Phone contacts, vCard, JSON backup"
           open={openSection === 'data'}
           onPress={() => toggleSection('data')}
         >
@@ -462,25 +568,27 @@ export default function SettingsScreen({
               label="Backup as JSON"
               onPress={backupAll}
             />
-            <DataRow
-              icon={<ArchiveIcon size={16} color={theme.warn} />}
-              label={'Archived (' + archivedContacts.length + ')'}
-              onPress={() => toggleSection('archived')}
-            />
           </View>
         </SettingsSection>
 
-        {/* Archived list (inline) */}
-        {archivedContacts.length > 0 && (
-          <SettingsSection
-            icon={<ArchiveIcon size={18} color={theme.warn} />}
-            title="Archived"
-            subtitle={archivedContacts.length + ' contacts'}
-            open={openSection === 'archived'}
-            onPress={() => toggleSection('archived')}
-          >
-            <View style={{ padding: 14, gap: 6 }}>
-              {archivedContacts.map((c) => (
+        <SettingsSection
+          icon={<ArchiveIcon size={18} color={theme.warn} />}
+          title="Archived"
+          subtitle={
+            archivedContacts.length === 0
+              ? 'No archived contacts'
+              : `${archivedContacts.length} ${archivedContacts.length === 1 ? 'contact' : 'contacts'}`
+          }
+          open={openSection === 'archived'}
+          onPress={() => toggleSection('archived')}
+        >
+          <View style={{ padding: 14, gap: 6 }}>
+            {archivedContacts.length === 0 ? (
+              <Text style={{ color: theme.t5, fontSize: 12, textAlign: 'center', padding: 8 }}>
+                Archived contacts will show up here.
+              </Text>
+            ) : (
+              archivedContacts.map((c) => (
                 <View
                   key={c.id}
                   style={{
@@ -497,9 +605,7 @@ export default function SettingsScreen({
                     <Text style={{ fontSize: 13, color: theme.t1, fontWeight: '500' }}>
                       {c.name}
                     </Text>
-                    <Text style={{ fontSize: 11, color: theme.t5 }}>
-                      {c.company}
-                    </Text>
+                    <Text style={{ fontSize: 11, color: theme.t5 }}>{c.company}</Text>
                   </TouchableOpacity>
                   <TouchableOpacity
                     onPress={() => onUnarchive(c)}
@@ -517,41 +623,232 @@ export default function SettingsScreen({
                     </Text>
                   </TouchableOpacity>
                 </View>
-              ))}
-            </View>
-          </SettingsSection>
-        )}
-
-        {/* About */}
-        <SettingsSection
-          icon={<RefreshIcon size={18} color={theme.t4} />}
-          title="About"
-          subtitle="App info and tutorial"
-          open={openSection === 'about'}
-          onPress={() => toggleSection('about')}
-        >
-          <View style={{ padding: 14, gap: 10 }}>
-            <DataRow
-              icon={<RefreshIcon size={16} color={theme.ac} />}
-              label="Replay Walkthrough"
-              onPress={onReplayWalkthrough}
-            />
-            <Text style={{ color: theme.t6, fontSize: 11, textAlign: 'center', marginTop: 8 }}>
-              Radius v1.0
-            </Text>
+              ))
+            )}
           </View>
         </SettingsSection>
+
+        {/* ============================================================
+            HELP & ABOUT
+            ============================================================ */}
+        <SectionLabel theme={theme} text="Help & About" />
+
+        <TouchableOpacity
+          onPress={onReplayWalkthrough}
+          style={{
+            backgroundColor: theme.bg2,
+            borderWidth: 1,
+            borderColor: theme.brd,
+            borderRadius: 14,
+            padding: 14,
+            marginBottom: 10,
+            flexDirection: 'row',
+            alignItems: 'center',
+            gap: 12,
+          }}
+        >
+          <RefreshIcon size={18} color={theme.ac} />
+          <View style={{ flex: 1 }}>
+            <Text style={{ color: theme.t1, fontSize: 14, fontWeight: '500' }}>
+              Replay Walkthrough
+            </Text>
+            <Text style={{ color: theme.t5, fontSize: 11, marginTop: 2 }}>
+              See the intro tour again
+            </Text>
+          </View>
+          <ChevronRight size={16} color={theme.t5} />
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          onPress={() => Linking.openURL('mailto:dallinrearl@gmail.com?subject=Radius feedback')}
+          style={{
+            backgroundColor: theme.bg2,
+            borderWidth: 1,
+            borderColor: theme.brd,
+            borderRadius: 14,
+            padding: 14,
+            marginBottom: 10,
+            flexDirection: 'row',
+            alignItems: 'center',
+            gap: 12,
+          }}
+        >
+          <MailIcon size={18} color={theme.info} />
+          <View style={{ flex: 1 }}>
+            <Text style={{ color: theme.t1, fontSize: 14, fontWeight: '500' }}>
+              Send Feedback
+            </Text>
+            <Text style={{ color: theme.t5, fontSize: 11, marginTop: 2 }}>
+              Bug reports, feature requests, ideas
+            </Text>
+          </View>
+          <ChevronRight size={16} color={theme.t5} />
+        </TouchableOpacity>
+
+        <View
+          style={{
+            backgroundColor: theme.bg2,
+            borderWidth: 1,
+            borderColor: theme.brd,
+            borderRadius: 14,
+            padding: 14,
+            marginBottom: 10,
+            alignItems: 'center',
+          }}
+        >
+          <Text style={{ color: theme.t6, fontSize: 11 }}>Radius v1.0</Text>
+        </View>
+
+        {/* ============================================================
+            BOTTOM ACTIONS (Sign out + destructive resets)
+            ============================================================ */}
+
+        <TouchableOpacity
+          onPress={handleSignOut}
+          style={{
+            backgroundColor: theme.bg2,
+            borderWidth: 1,
+            borderColor: theme.brd,
+            borderRadius: 14,
+            padding: 14,
+            marginTop: 18,
+            marginBottom: 10,
+            flexDirection: 'row',
+            alignItems: 'center',
+            gap: 12,
+          }}
+        >
+          <LockIcon size={18} color={theme.t4} />
+          <View style={{ flex: 1 }}>
+            <Text style={{ color: theme.t1, fontSize: 14, fontWeight: '500' }}>Sign out</Text>
+            <Text style={{ color: theme.t5, fontSize: 11, marginTop: 2 }}>
+              Sign out of this device
+            </Text>
+          </View>
+          <ChevronRight size={16} color={theme.t5} />
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          onPress={handleDeleteAllContacts}
+          style={{
+            backgroundColor: theme.bgRed,
+            borderWidth: 1,
+            borderColor: theme.brdRed,
+            borderRadius: 14,
+            padding: 14,
+            marginBottom: 10,
+            flexDirection: 'row',
+            alignItems: 'center',
+            gap: 12,
+          }}
+        >
+          <TrashIcon size={18} color={theme.red} />
+          <View style={{ flex: 1 }}>
+            <Text style={{ color: theme.red, fontSize: 14, fontWeight: '600' }}>
+              Delete all contacts
+            </Text>
+            <Text style={{ color: theme.t5, fontSize: 11, marginTop: 2 }}>
+              Removes every real contact. Cannot be undone.
+            </Text>
+          </View>
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          onPress={handleResetApp}
+          style={{
+            backgroundColor: theme.bgRed,
+            borderWidth: 1,
+            borderColor: theme.brdRed,
+            borderRadius: 14,
+            padding: 14,
+            marginBottom: 10,
+            flexDirection: 'row',
+            alignItems: 'center',
+            gap: 12,
+          }}
+        >
+          <RefreshIcon size={18} color={theme.red} />
+          <View style={{ flex: 1 }}>
+            <Text style={{ color: theme.red, fontSize: 14, fontWeight: '600' }}>
+              Reset app
+            </Text>
+            <Text style={{ color: theme.t5, fontSize: 11, marginTop: 2 }}>
+              Clears all local data. Account stays.
+            </Text>
+          </View>
+        </TouchableOpacity>
       </ScrollView>
     </View>
   );
 }
 
-// =================== Granola Integration ===================
-//
-// Stage 1: manual-trigger sync with API key stored locally in AsyncStorage.
-// User pastes their Granola Personal API key, hits Test, then Sync Now to
-// pull recent notes and append them to matching contacts' convLog.
+// ============================================================
+// Section label (small uppercase header above each group)
+// ============================================================
+function SectionLabel({ theme, text, danger }) {
+  return (
+    <Text
+      style={{
+        fontSize: 11,
+        color: danger ? theme.red : theme.t5,
+        fontWeight: '700',
+        letterSpacing: 0.6,
+        textTransform: 'uppercase',
+        marginTop: 18,
+        marginBottom: 8,
+        marginLeft: 4,
+      }}
+    >
+      {text}
+    </Text>
+  );
+}
 
+// ============================================================
+// Coming-soon stub row (greyed out, no chevron, no tap)
+// ============================================================
+function ComingSoonRow({ theme, icon, title, subtitle }) {
+  return (
+    <View
+      style={{
+        backgroundColor: theme.bg2,
+        borderWidth: 1,
+        borderColor: theme.brd,
+        borderRadius: 14,
+        padding: 14,
+        marginBottom: 10,
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 12,
+        opacity: 0.55,
+      }}
+    >
+      {icon}
+      <View style={{ flex: 1 }}>
+        <Text style={{ color: theme.t2, fontSize: 14, fontWeight: '500' }}>{title}</Text>
+        <Text style={{ color: theme.t5, fontSize: 11, marginTop: 2 }}>{subtitle}</Text>
+      </View>
+      <View
+        style={{
+          paddingHorizontal: 8,
+          paddingVertical: 3,
+          borderRadius: 6,
+          backgroundColor: theme.bg3,
+          borderWidth: 1,
+          borderColor: theme.brd2,
+        }}
+      >
+        <Text style={{ color: theme.t5, fontSize: 9, fontWeight: '700', letterSpacing: 0.4 }}>
+          SOON
+        </Text>
+      </View>
+    </View>
+  );
+}
+
+// ============================================================
+// Granola Integration (unchanged from prior version)
+// ============================================================
 function GranolaIntegration({
   myCard,
   contacts,
@@ -561,17 +858,17 @@ function GranolaIntegration({
   onAddToReviewQueue,
   onClearReviewQueue,
   onOpenReviewQueue,
+  granolaAiUnlocked,
 }) {
   const { theme } = useTheme();
 
   const [apiKey, setApiKey] = useState('');
-  const [storedKey, setStoredKey] = useState(null); // null = unknown, '' = none, 'gk_...' = present
+  const [storedKey, setStoredKey] = useState(null);
   const [testing, setTesting] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [lastSync, setLastSync] = useState(null);
   const [syncStatus, setSyncStatus] = useState('');
 
-  // Load stored key + last sync on mount
   useEffect(() => {
     (async () => {
       try {
@@ -613,28 +910,22 @@ function GranolaIntegration({
   }
 
   async function disconnect() {
-    Alert.alert(
+    confirmAction(
       'Disconnect Granola',
       'This removes your API key from this device and clears any pending review items. Your existing meeting log entries will stay.',
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Disconnect',
-          style: 'destructive',
-          onPress: async () => {
-            await AsyncStorage.removeItem(GRANOLA_KEY_STORAGE);
-            await AsyncStorage.removeItem(GRANOLA_LAST_SYNC_STORAGE);
-            await AsyncStorage.removeItem(GRANOLA_PROCESSED_IDS_STORAGE);
-            if (onClearReviewQueue) {
-              await onClearReviewQueue();
-            }
-            setStoredKey('');
-            setLastSync(null);
-            setSyncStatus('');
-            showToast && showToast('Granola disconnected');
-          },
-        },
-      ],
+      async () => {
+        await AsyncStorage.removeItem(GRANOLA_KEY_STORAGE);
+        await AsyncStorage.removeItem(GRANOLA_LAST_SYNC_STORAGE);
+        await AsyncStorage.removeItem(GRANOLA_PROCESSED_IDS_STORAGE);
+        if (onClearReviewQueue) {
+          await onClearReviewQueue();
+        }
+        setStoredKey('');
+        setLastSync(null);
+        setSyncStatus('');
+        showToast && showToast('Granola disconnected');
+      },
+      'Disconnect',
     );
   }
 
@@ -654,7 +945,6 @@ function GranolaIntegration({
         granolaAiUnlocked: !!granolaAiUnlocked,
       });
 
-      // Reflect the new last-sync timestamp in the UI
       const now = new Date().toISOString();
       setLastSync(now);
 
@@ -675,7 +965,6 @@ function GranolaIntegration({
     return k.slice(0, 6) + '••••••••' + k.slice(-4);
   }
 
-  // ---- Loading state ----
   if (storedKey === null) {
     return (
       <View style={{ padding: 14 }}>
@@ -684,7 +973,6 @@ function GranolaIntegration({
     );
   }
 
-  // ---- Connected state ----
   if (isConnected) {
     return (
       <View style={{ padding: 14, gap: 12 }}>
@@ -747,12 +1035,9 @@ function GranolaIntegration({
         </TouchableOpacity>
 
         {syncStatus ? (
-          <Text style={{ color: theme.t4, fontSize: 11, lineHeight: 16 }}>
-            {syncStatus}
-          </Text>
+          <Text style={{ color: theme.t4, fontSize: 11, lineHeight: 16 }}>{syncStatus}</Text>
         ) : null}
 
-        {/* Review queue access row (only shown when there are items) */}
         {Array.isArray(reviewQueue) && reviewQueue.length > 0 ? (
           <TouchableOpacity
             onPress={() => onOpenReviewQueue && onOpenReviewQueue()}
@@ -800,9 +1085,7 @@ function GranolaIntegration({
             alignItems: 'center',
           }}
         >
-          <Text style={{ color: theme.red, fontSize: 12, fontWeight: '600' }}>
-            Disconnect
-          </Text>
+          <Text style={{ color: theme.red, fontSize: 12, fontWeight: '600' }}>Disconnect</Text>
         </TouchableOpacity>
 
         <Text style={{ color: theme.t6, fontSize: 11, lineHeight: 16, marginTop: 4 }}>
@@ -814,7 +1097,6 @@ function GranolaIntegration({
     );
   }
 
-  // ---- Disconnected state ----
   return (
     <View style={{ padding: 14, gap: 10 }}>
       <Text style={{ color: theme.t4, fontSize: 12, lineHeight: 17 }}>
@@ -845,20 +1127,19 @@ function GranolaIntegration({
         {testing ? (
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
             <ActivityIndicator color="#fff" size="small" />
-            <Text style={{ color: '#fff', fontSize: 13, fontWeight: '700' }}>
-              Testing...
-            </Text>
+            <Text style={{ color: '#fff', fontSize: 13, fontWeight: '700' }}>Testing...</Text>
           </View>
         ) : (
-          <Text style={{ color: '#fff', fontSize: 13, fontWeight: '700' }}>
-            Connect
-          </Text>
+          <Text style={{ color: '#fff', fontSize: 13, fontWeight: '700' }}>Connect</Text>
         )}
       </TouchableOpacity>
     </View>
   );
 }
 
+// ============================================================
+// Shared collapsible section
+// ============================================================
 function SettingsSection({ icon, title, subtitle, open, onPress, children }) {
   const { theme } = useTheme();
   return (
@@ -916,8 +1197,9 @@ function DataRow({ icon, label, onPress }) {
   );
 }
 
-// =================== Tags Manager ===================
-
+// ============================================================
+// Tags Manager (unchanged)
+// ============================================================
 function TagsManager({ customTags, hiddenTags, onSaveCustom, onSaveHidden }) {
   const { theme } = useTheme();
   const [openCat, setOpenCat] = useState(null);
@@ -974,14 +1256,12 @@ function TagsManager({ customTags, hiddenTags, onSaveCustom, onSaveHidden }) {
   }
 
   function deleteCustom(label) {
-    Alert.alert('Delete tag', `Delete "${label}"?`, [
-      { text: 'Cancel', style: 'cancel' },
-      {
-        text: 'Delete',
-        style: 'destructive',
-        onPress: () => onSaveCustom(customTags.filter((x) => x !== label)),
-      },
-    ]);
+    confirmAction(
+      'Delete tag',
+      `Delete "${label}"?`,
+      () => onSaveCustom(customTags.filter((x) => x !== label)),
+      'Delete',
+    );
   }
 
   return (
@@ -1038,9 +1318,7 @@ function TagsManager({ customTags, hiddenTags, onSaveCustom, onSaveHidden }) {
               }
             : null
         }
-        allHidden={
-          customTags.length > 0 && customTags.every((t) => hiddenTags.includes(t))
-        }
+        allHidden={customTags.length > 0 && customTags.every((t) => hiddenTags.includes(t))}
       >
         {customTags.length === 0 && (
           <Text style={{ fontSize: 12, color: theme.t6, marginBottom: 8 }}>
@@ -1152,9 +1430,7 @@ function CategoryBlock({
           <View style={{ transform: [{ rotate: open ? '180deg' : '0deg' }] }}>
             <ChevronDown size={14} color={theme.t5} />
           </View>
-          <Text style={{ fontSize: 13, color: theme.t1, fontWeight: '600' }}>
-            {label}
-          </Text>
+          <Text style={{ fontSize: 13, color: theme.t1, fontWeight: '600' }}>{label}</Text>
           <Text style={{ fontSize: 11, color: theme.t5 }}>
             {count > 0 ? `${visibleCount}/${count}` : '0'}
           </Text>
@@ -1250,8 +1526,9 @@ function TagChip({ label, hidden, onPress, onDelete }) {
   );
 }
 
-// =================== Interests Manager ===================
-
+// ============================================================
+// Interests Manager (unchanged, with confirmAction)
+// ============================================================
 function InterestsManager({ customInterests, hiddenInterests, onSaveCustom, onSaveHidden }) {
   const { theme } = useTheme();
   const [adding, setAdding] = useState(false);
@@ -1271,14 +1548,12 @@ function InterestsManager({ customInterests, hiddenInterests, onSaveCustom, onSa
   }
 
   function deleteOne(t) {
-    Alert.alert('Delete interest', 'Delete "' + t + '"?', [
-      { text: 'Cancel', style: 'cancel' },
-      {
-        text: 'Delete',
-        style: 'destructive',
-        onPress: () => onSaveCustom(customInterests.filter((x) => x !== t)),
-      },
-    ]);
+    confirmAction(
+      'Delete interest',
+      'Delete "' + t + '"?',
+      () => onSaveCustom(customInterests.filter((x) => x !== t)),
+      'Delete',
+    );
   }
 
   return (
@@ -1361,10 +1636,9 @@ function InterestsManager({ customInterests, hiddenInterests, onSaveCustom, onSa
   );
 }
 
-// SubscriptionCard — shows current plan + AI usage + upgrade or manage CTA.
-// Free: shows "X of 5 AI calls used" and an Upgrade button.
-// Trial: shows "X days left in trial" and a Manage subscription button.
-// Pro: shows "Pro plan, unlimited AI" and a Manage subscription button.
+// ============================================================
+// Subscription card (unchanged, just lives under Account section now)
+// ============================================================
 function SubscriptionCard({
   theme,
   tier,
@@ -1377,8 +1651,6 @@ function SubscriptionCard({
   onUpgrade,
   onManage,
 }) {
-  // Treat anything not 'pro' or 'trial' as free. This catches null/undefined/
-  // unexpected tier values from the database.
   const isPro = tier === 'pro' && !trialActive;
   const isTrial = tier === 'trial' || trialActive;
   const isFree = !isPro && !isTrial;
@@ -1395,12 +1667,9 @@ function SubscriptionCard({
     label = 'Pro';
     subline = 'Unlimited AI · all features unlocked';
   } else {
-    // Free — show usage. Use 5 as the cap fallback if aiRemaining is weird.
     const used = Number.isFinite(aiCallsCount) ? aiCallsCount : 0;
     const total =
-      Number.isFinite(aiRemaining) && aiRemaining > 0
-        ? used + aiRemaining
-        : 5;
+      Number.isFinite(aiRemaining) && aiRemaining > 0 ? used + aiRemaining : 5;
     subline = used + ' of ' + total + ' AI calls used this month';
   }
 
@@ -1410,12 +1679,18 @@ function SubscriptionCard({
         backgroundColor: isFree ? theme.bg2 : theme.bgAc,
         borderWidth: 1,
         borderColor: isFree ? theme.brd : theme.brdAc,
-        borderRadius: 16,
-        padding: 16,
-        marginBottom: 16,
+        borderRadius: 14,
+        padding: 14,
+        marginBottom: 10,
       }}
     >
-      <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+      <View
+        style={{
+          flexDirection: 'row',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+        }}
+      >
         <View style={{ flex: 1 }}>
           <Text
             style={{
@@ -1440,9 +1715,7 @@ function SubscriptionCard({
           >
             {label}
           </Text>
-          {subline ? (
-            <Text style={{ fontSize: 12, color: theme.t4 }}>{subline}</Text>
-          ) : null}
+          {subline ? <Text style={{ fontSize: 12, color: theme.t4 }}>{subline}</Text> : null}
         </View>
         {isFree ? (
           <TouchableOpacity

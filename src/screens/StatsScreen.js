@@ -1,17 +1,216 @@
-import React, { useMemo } from 'react';
-import { View, Text, ScrollView, Dimensions } from 'react-native';
-import Svg, { Path, Circle, Line, Rect, Polyline, G, Text as SvgText } from 'react-native-svg';
+import React, { useMemo, useState } from 'react';
+import { View, Text, ScrollView, Dimensions, TouchableOpacity } from 'react-native';
+import Svg, { Path, Circle, Line, Rect, G, Text as SvgText, Defs, RadialGradient, Stop } from 'react-native-svg';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useTheme } from '../styles/theme';
-import { nextDate, daysUntil, daysSince, getTagColor } from '../utils/helpers';
+import { nextDate, daysUntil } from '../utils/helpers';
+import { TAG_COLORS, CUSTOM_TAG_COLORS } from '../constants';
 
 const { width: SCREEN_W } = Dimensions.get('window');
+
+// Distinct colors used for category slices that don't have a TAG_COLORS
+// entry (companies, cities, tenure buckets). Health filter has its own
+// semantic color set (strong/warm/cool/cold).
+const PIE_PALETTE = [
+  '#0077B6', '#00C9A7', '#7B5EEA', '#F4A261', '#E060A0',
+  '#48B8E0', '#6B7FBA', '#F0B040', '#5BC2A8', '#A45EE0',
+  '#3D8FD8', '#22B098',
+];
+
+// =================== Filter definitions ===================
+//
+// Each filter knows how to bucket the contacts list into a flat
+// [{ label, count, color }] array. The pie chart consumes that directly.
+
+const FILTERS = [
+  { v: 'health', l: 'Health' },
+  { v: 'category', l: 'Category' },
+  { v: 'company', l: 'Company' },
+  { v: 'location', l: 'Location' },
+  { v: 'tenure', l: 'Tenure' },
+  { v: 'next', l: 'Next Contact' },
+];
+
+function bucketByHealth(contacts, theme) {
+  const r = { strong: 0, warm: 0, cool: 0, cold: 0 };
+  contacts.forEach((c) => {
+    const nd = nextDate(c.lastContacted, c.freq, c.freqStartedAt, c.freqDayOfWeek);
+    if (!nd) {
+      r.cool++;
+      return;
+    }
+    const d = daysUntil(nd);
+    if (d >= 0 && d <= 7) r.strong++;
+    else if (d > 7) r.warm++;
+    else if (d >= -14) r.cool++;
+    else r.cold++;
+  });
+  return [
+    { label: 'Strong', count: r.strong, color: theme.ac },
+    { label: 'Warm', count: r.warm, color: theme.info },
+    { label: 'Cool', count: r.cool, color: theme.warn },
+    { label: 'Cold', count: r.cold, color: theme.red },
+  ].filter((s) => s.count > 0);
+}
+
+function bucketByCategory(contacts) {
+  const map = {};
+  contacts.forEach((c) =>
+    (c.tags || []).forEach((t) => {
+      map[t] = (map[t] || 0) + 1;
+    }),
+  );
+  // Untagged contacts get their own slice so the user can see how
+  // disorganized the network is.
+  const untagged = contacts.filter((c) => !c.tags || c.tags.length === 0).length;
+  if (untagged > 0) map['Untagged'] = untagged;
+
+  const sorted = Object.entries(map).sort((a, b) => b[1] - a[1]);
+  return sorted.map(([label, count], i) => ({
+    label,
+    count,
+    color: TAG_COLORS[label] || CUSTOM_TAG_COLORS[i % CUSTOM_TAG_COLORS.length] || PIE_PALETTE[i % PIE_PALETTE.length],
+  }));
+}
+
+function bucketByCompany(contacts) {
+  const map = {};
+  contacts.forEach((c) => {
+    const key = (c.company || '').trim() || '(No company)';
+    map[key] = (map[key] || 0) + 1;
+  });
+  const sorted = Object.entries(map).sort((a, b) => b[1] - a[1]);
+  // Long tail of one-offs gets folded into "Other" so the pie stays readable.
+  const top = sorted.slice(0, 8);
+  const rest = sorted.slice(8).reduce((sum, [, c]) => sum + c, 0);
+  const arr = top.map(([label, count], i) => ({
+    label,
+    count,
+    color: PIE_PALETTE[i % PIE_PALETTE.length],
+  }));
+  if (rest > 0) arr.push({ label: 'Other', count: rest, color: '#888888' });
+  return arr;
+}
+
+function bucketByLocation(contacts) {
+  const map = {};
+  contacts.forEach((c) => {
+    // Use location first; fall back to hometown if location is empty.
+    const raw = (c.location || c.hometown || '').trim();
+    const key = raw || '(Unknown)';
+    map[key] = (map[key] || 0) + 1;
+  });
+  const sorted = Object.entries(map).sort((a, b) => b[1] - a[1]);
+  const top = sorted.slice(0, 8);
+  const rest = sorted.slice(8).reduce((sum, [, c]) => sum + c, 0);
+  const arr = top.map(([label, count], i) => ({
+    label,
+    count,
+    color: PIE_PALETTE[i % PIE_PALETTE.length],
+  }));
+  if (rest > 0) arr.push({ label: 'Other', count: rest, color: '#888888' });
+  return arr;
+}
+
+function bucketByTenure(contacts, theme) {
+  // Tenure = how long the contact has been in the user's network. Anchor
+  // off the earliest convLog entry, falling back to lastContacted, falling
+  // back to "(Unknown)". Buckets:
+  //   < 3 mo, 3-12 mo, 1-3 yr, 3+ yr, unknown
+  const now = new Date();
+  const buckets = {
+    'New (< 3mo)': 0,
+    '3-12 months': 0,
+    '1-3 years': 0,
+    '3+ years': 0,
+    Unknown: 0,
+  };
+
+  contacts.forEach((c) => {
+    let earliest = null;
+    if (Array.isArray(c.convLog) && c.convLog.length > 0) {
+      c.convLog.forEach((e) => {
+        if (!e?.date) return;
+        const t = Date.parse(e.date);
+        if (Number.isFinite(t) && (earliest == null || t < earliest)) earliest = t;
+      });
+    }
+    if (earliest == null && c.lastContacted) {
+      const t = Date.parse(c.lastContacted);
+      if (Number.isFinite(t)) earliest = t;
+    }
+    if (earliest == null) {
+      buckets.Unknown++;
+      return;
+    }
+    const days = (now.getTime() - earliest) / 86400000;
+    if (days < 90) buckets['New (< 3mo)']++;
+    else if (days < 365) buckets['3-12 months']++;
+    else if (days < 365 * 3) buckets['1-3 years']++;
+    else buckets['3+ years']++;
+  });
+
+  return [
+    { label: 'New (< 3mo)', count: buckets['New (< 3mo)'], color: theme.ac },
+    { label: '3-12 months', count: buckets['3-12 months'], color: theme.info },
+    { label: '1-3 years', count: buckets['1-3 years'], color: theme.purp },
+    { label: '3+ years', count: buckets['3+ years'], color: theme.warn },
+    { label: 'Unknown', count: buckets.Unknown, color: '#888888' },
+  ].filter((s) => s.count > 0);
+}
+
+// Bucket by time-to-next-contact based on each contact's lastContacted +
+// freq schedule. "Overdue" gets a hot color, then cooling palette as the
+// horizon stretches out. Contacts with no schedule (freq: 'never' or no
+// lastContacted at all) get their own bucket so they're visible.
+function bucketByNextContact(contacts, theme) {
+  const buckets = {
+    'Overdue': 0,
+    'Within 1 week': 0,
+    '1 week-1 month': 0,
+    '1-3 months': 0,
+    '3-6 months': 0,
+    '6 months-1 year': 0,
+    '1+ year': 0,
+    'No schedule': 0,
+  };
+
+  contacts.forEach((c) => {
+    const nd = nextDate(c.lastContacted, c.freq, c.freqStartedAt, c.freqDayOfWeek);
+    if (!nd) {
+      buckets['No schedule']++;
+      return;
+    }
+    const d = daysUntil(nd);
+    if (d < 0) buckets['Overdue']++;
+    else if (d <= 7) buckets['Within 1 week']++;
+    else if (d <= 30) buckets['1 week-1 month']++;
+    else if (d <= 90) buckets['1-3 months']++;
+    else if (d <= 180) buckets['3-6 months']++;
+    else if (d <= 365) buckets['6 months-1 year']++;
+    else buckets['1+ year']++;
+  });
+
+  return [
+    { label: 'Overdue', count: buckets['Overdue'], color: theme.red },
+    { label: 'Within 1 week', count: buckets['Within 1 week'], color: theme.warn },
+    { label: '1 week-1 month', count: buckets['1 week-1 month'], color: theme.ac },
+    { label: '1-3 months', count: buckets['1-3 months'], color: theme.info },
+    { label: '3-6 months', count: buckets['3-6 months'], color: theme.purp },
+    { label: '6 months-1 year', count: buckets['6 months-1 year'], color: '#5BC2A8' },
+    { label: '1+ year', count: buckets['1+ year'], color: '#6B7FBA' },
+    { label: 'No schedule', count: buckets['No schedule'], color: '#888888' },
+  ].filter((s) => s.count > 0);
+}
+
+// =================== Main screen ===================
 
 export default function StatsScreen({ activeContacts }) {
   const { theme } = useTheme();
   const insets = useSafeAreaInsets();
+  const [pieFilter, setPieFilter] = useState('health');
 
-  // Build 12-month series of contacts logged
+  // Build 12-month series of touchpoints logged.
   const monthly = useMemo(() => {
     const result = [];
     const now = new Date();
@@ -31,7 +230,7 @@ export default function StatsScreen({ activeContacts }) {
     return result;
   }, [activeContacts]);
 
-  // Activity streaks
+  // Activity streaks.
   const streaks = useMemo(() => {
     const allDates = new Set();
     activeContacts.forEach((c) =>
@@ -78,62 +277,7 @@ export default function StatsScreen({ activeContacts }) {
     return { current: curr, best, thisWeek, thisMonth };
   }, [activeContacts]);
 
-  // Health distribution
-  const health = useMemo(() => {
-    const r = { strong: 0, warm: 0, cool: 0, cold: 0 };
-    activeContacts.forEach((c) => {
-      const nd = nextDate(c.lastContacted, c.freq);
-      if (!nd) {
-        r.cool++;
-        return;
-      }
-      const d = daysUntil(nd);
-      if (d >= 0 && d <= 7) r.strong++;
-      else if (d > 7) r.warm++;
-      else if (d >= -14) r.cool++;
-      else r.cold++;
-    });
-    return r;
-  }, [activeContacts]);
-
-  // 8-week activity
-  const weeks = useMemo(() => {
-    const r = [];
-    for (let i = 7; i >= 0; i--) {
-      const wEnd = new Date();
-      wEnd.setDate(wEnd.getDate() - i * 7);
-      const wStart = new Date(wEnd);
-      wStart.setDate(wStart.getDate() - 6);
-      let count = 0;
-      activeContacts.forEach((c) =>
-        (c.convLog || []).forEach((e) => {
-          if (!e.date) return;
-          const ed = new Date(e.date + 'T12:00:00');
-          if (ed >= wStart && ed <= wEnd) count++;
-        }),
-      );
-      r.push({
-        label: wStart.toLocaleDateString('en-US', { month: 'numeric', day: 'numeric' }),
-        count,
-      });
-    }
-    return r;
-  }, [activeContacts]);
-
-  // Network by tag
-  const tagCounts = useMemo(() => {
-    const map = {};
-    activeContacts.forEach((c) =>
-      (c.tags || []).forEach((t) => {
-        map[t] = (map[t] || 0) + 1;
-      }),
-    );
-    return Object.entries(map)
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, 8);
-  }, [activeContacts]);
-
-  // Heatmap last 14 days
+  // Heatmap last 14 days.
   const heatmap = useMemo(() => {
     const r = [];
     for (let i = 13; i >= 0; i--) {
@@ -151,11 +295,36 @@ export default function StatsScreen({ activeContacts }) {
     return r;
   }, [activeContacts]);
 
+  // Pie data for the currently selected filter.
+  const pieData = useMemo(() => {
+    switch (pieFilter) {
+      case 'health':
+        return bucketByHealth(activeContacts, theme);
+      case 'category':
+        return bucketByCategory(activeContacts);
+      case 'company':
+        return bucketByCompany(activeContacts);
+      case 'location':
+        return bucketByLocation(activeContacts);
+      case 'tenure':
+        return bucketByTenure(activeContacts, theme);
+      case 'next':
+        return bucketByNextContact(activeContacts, theme);
+      default:
+        return [];
+    }
+  }, [activeContacts, pieFilter, theme]);
+
   const totalLogs = activeContacts.reduce((sum, c) => sum + (c.convLog || []).length, 0);
   const overdue = activeContacts.filter((c) => {
-    const nd = nextDate(c.lastContacted, c.freq);
+    const nd = nextDate(c.lastContacted, c.freq, c.freqStartedAt, c.freqDayOfWeek);
     return nd && daysUntil(nd) < 0;
   }).length;
+  const activeTagCount = useMemo(() => {
+    const set = new Set();
+    activeContacts.forEach((c) => (c.tags || []).forEach((t) => set.add(t)));
+    return set.size;
+  }, [activeContacts]);
 
   return (
     <View style={{ flex: 1, backgroundColor: theme.bg }}>
@@ -182,15 +351,18 @@ export default function StatsScreen({ activeContacts }) {
         </Text>
 
         {/* Top stats grid */}
-        <View style={{ flexDirection: 'row', flexWrap: 'wrap', marginHorizontal: -4, marginBottom: 18 }}>
+        <View
+          style={{
+            flexDirection: 'row',
+            flexWrap: 'wrap',
+            marginHorizontal: -4,
+            marginBottom: 18,
+          }}
+        >
           <StatCard label="Total Contacts" value={activeContacts.length} color={theme.ac} />
           <StatCard label="Touchpoints Logged" value={totalLogs} color={theme.info} />
           <StatCard label="Overdue" value={overdue} color={theme.red} />
-          <StatCard
-            label="Active Tags"
-            value={Object.keys(tagCounts).length || tagCounts.length}
-            color={theme.purp}
-          />
+          <StatCard label="Active Tags" value={activeTagCount} color={theme.purp} />
         </View>
 
         {/* Activity Line Chart */}
@@ -264,68 +436,78 @@ export default function StatsScreen({ activeContacts }) {
           </View>
         </Card>
 
-        {/* Health donut */}
-        <Card title="Relationship Health">
-          <DonutChart data={health} theme={theme} />
-          <View style={{ marginTop: 12, gap: 6 }}>
-            <LegendRow label="Strong" count={health.strong} color={theme.ac} />
-            <LegendRow label="Warm" count={health.warm} color={theme.info} />
-            <LegendRow label="Cool" count={health.cool} color={theme.warn} />
-            <LegendRow label="Cold" count={health.cold} color={theme.red} />
+        {/* Filtered Pie Chart */}
+        <Card title="Network Breakdown">
+          <FilterTabs filters={FILTERS} value={pieFilter} onChange={setPieFilter} theme={theme} />
+          <View style={{ marginTop: 14 }}>
+            <PieChart
+              data={pieData}
+              theme={theme}
+              filterLabel={FILTERS.find((f) => f.v === pieFilter)?.l || ''}
+            />
+          </View>
+          <View style={{ marginTop: 14, gap: 6 }}>
+            {pieData.length === 0 ? (
+              <Text
+                style={{
+                  color: theme.t6,
+                  fontSize: 12,
+                  textAlign: 'center',
+                  paddingVertical: 14,
+                }}
+              >
+                No data for this view yet.
+              </Text>
+            ) : (
+              pieData.map((s) => (
+                <LegendRow key={s.label} label={s.label} count={s.count} color={s.color} />
+              ))
+            )}
           </View>
         </Card>
-
-        {/* 8-week bars */}
-        <Card title="Weekly Activity (8 Weeks)">
-          <BarChart data={weeks} theme={theme} />
-        </Card>
-
-        {/* Tag breakdown */}
-        <Card title="Network by Category">
-          {tagCounts.length === 0 ? (
-            <Text style={{ color: theme.t6, fontSize: 12, textAlign: 'center', paddingVertical: 20 }}>
-              No tagged contacts yet.
-            </Text>
-          ) : (
-            tagCounts.map(([tag, count]) => {
-              const max = tagCounts[0][1];
-              const pct = (count / max) * 100;
-              const c = getTagColor(tag);
-              return (
-                <View key={tag} style={{ marginBottom: 8 }}>
-                  <View
-                    style={{
-                      flexDirection: 'row',
-                      justifyContent: 'space-between',
-                      marginBottom: 4,
-                    }}
-                  >
-                    <Text style={{ fontSize: 12, color: theme.t2, fontWeight: '500' }}>{tag}</Text>
-                    <Text style={{ fontSize: 11, color: theme.t5, fontWeight: '600' }}>{count}</Text>
-                  </View>
-                  <View
-                    style={{
-                      height: 6,
-                      backgroundColor: theme.bg3,
-                      borderRadius: 3,
-                      overflow: 'hidden',
-                    }}
-                  >
-                    <View
-                      style={{
-                        width: pct + '%',
-                        height: '100%',
-                        backgroundColor: c,
-                        borderRadius: 3,
-                      }}
-                    />
-                  </View>
-                </View>
-              );
-            })
-          )}
-        </Card>
       </ScrollView>
+    </View>
+  );
+}
+
+// =================== Sub-components ===================
+
+function FilterTabs({ filters, value, onChange, theme }) {
+  return (
+    <View
+      style={{
+        flexDirection: 'row',
+        flexWrap: 'wrap',
+        gap: 6,
+      }}
+    >
+      {filters.map((f) => {
+        const on = value === f.v;
+        return (
+          <TouchableOpacity
+            key={f.v}
+            onPress={() => onChange(f.v)}
+            style={{
+              paddingHorizontal: 12,
+              paddingVertical: 6,
+              borderRadius: 999,
+              borderWidth: 1,
+              backgroundColor: on ? theme.ac : theme.bg3,
+              borderColor: on ? theme.ac : theme.brd2,
+            }}
+          >
+            <Text
+              style={{
+                fontSize: 11,
+                fontWeight: '600',
+                color: on ? theme.bg : theme.t4,
+              }}
+            >
+              {f.l}
+            </Text>
+          </TouchableOpacity>
+        );
+      })}
     </View>
   );
 }
@@ -416,7 +598,9 @@ function LegendRow({ label, count, color }) {
   return (
     <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
       <View style={{ width: 10, height: 10, borderRadius: 5, backgroundColor: color }} />
-      <Text style={{ fontSize: 12, color: theme.t3, flex: 1 }}>{label}</Text>
+      <Text style={{ fontSize: 12, color: theme.t3, flex: 1 }} numberOfLines={1}>
+        {label}
+      </Text>
       <Text style={{ fontSize: 12, color: theme.t2, fontWeight: '600' }}>{count}</Text>
     </View>
   );
@@ -437,7 +621,6 @@ function LineChart({ data, theme }) {
   return (
     <View>
       <Svg width={W} height={H + 24}>
-        {/* Grid */}
         {[0.25, 0.5, 0.75].map((p, i) => (
           <Line
             key={i}
@@ -472,38 +655,14 @@ function LineChart({ data, theme }) {
   );
 }
 
-function BarChart({ data, theme }) {
-  const W = SCREEN_W - 80;
-  const H = 120;
-  const max = Math.max(...data.map((d) => d.count), 1);
-  const bw = (W / data.length) * 0.7;
-  const gap = (W / data.length) * 0.3;
-  return (
-    <Svg width={W} height={H + 24}>
-      {data.map((d, i) => {
-        const bh = (d.count / max) * (H - 14);
-        const x = i * (bw + gap) + gap / 2;
-        const y = H - bh;
-        return (
-          <G key={i}>
-            <Rect x={x} y={y} width={bw} height={bh} fill={theme.ac} rx="3" />
-            {d.count > 0 && (
-              <SvgText x={x + bw / 2} y={y - 3} fontSize="9" fill={theme.t3} textAnchor="middle">
-                {d.count}
-              </SvgText>
-            )}
-            <SvgText x={x + bw / 2} y={H + 14} fontSize="8" fill={theme.t5} textAnchor="middle">
-              {d.label}
-            </SvgText>
-          </G>
-        );
-      })}
-    </Svg>
-  );
-}
-
-function DonutChart({ data, theme }) {
-  const total = data.strong + data.warm + data.cool + data.cold;
+// Upgraded donut chart. Visual upgrades over a basic pie:
+//   - Donut form with center label (total count + filter name)
+//   - White separator strokes between slices for crisp definition
+//   - Largest slice gets a subtle outer halo / lift to draw the eye
+//   - Slight inner radial-gradient shading for soft depth (no hard shadows)
+//   - Drop-in compatible with the previous PieChart props
+function PieChart({ data, theme, filterLabel }) {
+  const total = data.reduce((sum, s) => sum + s.count, 0);
   if (total === 0) {
     return (
       <Text
@@ -518,50 +677,126 @@ function DonutChart({ data, theme }) {
       </Text>
     );
   }
-  const size = 160;
-  const r = 60;
+
+  // Sizing — slightly larger so the donut feels like a hero element.
+  const size = 200;
   const cx = size / 2;
   const cy = size / 2;
-  const segments = [
-    { v: data.strong, c: theme.ac },
-    { v: data.warm, c: theme.info },
-    { v: data.cool, c: theme.warn },
-    { v: data.cold, c: theme.red },
-  ].filter((s) => s.v > 0);
+  const rOuter = 88;        // outer edge of donut ring
+  const rOuterHalo = 92;    // halo edge for the dominant slice
+  const rInner = 54;        // inner edge — bigger hole = more elegant
+  const ringGap = 1.5;      // tiny visual gap between slices
+
+  // Find largest slice to give it gentle emphasis.
+  let largestIdx = 0;
+  data.forEach((s, i) => {
+    if (s.count > data[largestIdx].count) largestIdx = i;
+  });
+
+  // Build slice paths.
   let cumAngle = -Math.PI / 2;
+  const slices = data.map((s, i) => {
+    const a = (s.count / total) * Math.PI * 2;
+    const isLargest = i === largestIdx && data.length > 1;
+    const startA = cumAngle + (data.length > 1 ? ringGap / rOuter / 2 : 0);
+    const endA = cumAngle + a - (data.length > 1 ? ringGap / rOuter / 2 : 0);
+
+    // Use the slightly larger radius for the dominant slice's outer edge.
+    const ro = isLargest ? rOuterHalo : rOuter;
+
+    let path;
+    if (data.length === 1) {
+      // Single slice — render as a full annulus (donut ring) instead of
+      // trying to draw an arc that wraps 360°, which is degenerate in SVG.
+      path = (
+        <G key={i}>
+          <Circle cx={cx} cy={cy} r={ro} fill={s.color} />
+          <Circle cx={cx} cy={cy} r={rInner} fill={theme.bg2} />
+        </G>
+      );
+    } else {
+      const x1 = cx + ro * Math.cos(startA);
+      const y1 = cy + ro * Math.sin(startA);
+      const x2 = cx + ro * Math.cos(endA);
+      const y2 = cy + ro * Math.sin(endA);
+      const xi1 = cx + rInner * Math.cos(endA);
+      const yi1 = cy + rInner * Math.sin(endA);
+      const xi2 = cx + rInner * Math.cos(startA);
+      const yi2 = cy + rInner * Math.sin(startA);
+      const large = a > Math.PI ? 1 : 0;
+      const d = [
+        'M ' + x1 + ' ' + y1,
+        'A ' + ro + ' ' + ro + ' 0 ' + large + ' 1 ' + x2 + ' ' + y2,
+        'L ' + xi1 + ' ' + yi1,
+        'A ' + rInner + ' ' + rInner + ' 0 ' + large + ' 0 ' + xi2 + ' ' + yi2,
+        'Z',
+      ].join(' ');
+      path = (
+        <Path
+          key={i}
+          d={d}
+          fill={s.color}
+          stroke={theme.bg2}
+          strokeWidth={2}
+          strokeLinejoin="round"
+        />
+      );
+    }
+    cumAngle += a;
+    return path;
+  });
+
+  // Choose label text colors. Theme-friendly fallback chain.
+  const totalColor = theme.t1 || '#222';
+  const labelColor = theme.t5 || '#888';
 
   return (
     <View style={{ alignItems: 'center' }}>
       <Svg width={size} height={size}>
-        {segments.map((s, i) => {
-          const a = (s.v / total) * Math.PI * 2;
-          const x1 = cx + r * Math.cos(cumAngle);
-          const y1 = cy + r * Math.sin(cumAngle);
-          const x2 = cx + r * Math.cos(cumAngle + a);
-          const y2 = cy + r * Math.sin(cumAngle + a);
-          const large = a > Math.PI ? 1 : 0;
-          const path = [
-            'M ' + cx + ' ' + cy,
-            'L ' + x1 + ' ' + y1,
-            'A ' + r + ' ' + r + ' 0 ' + large + ' 1 ' + x2 + ' ' + y2,
-            'Z',
-          ].join(' ');
-          cumAngle += a;
-          return <Path key={i} d={path} fill={s.c} />;
-        })}
-        <Circle cx={cx} cy={cy} r={r * 0.6} fill={theme.bg2} />
+        <Defs>
+          {/* Soft radial inner shading to give the donut a hint of depth
+              without going full skeuomorphic. */}
+          <RadialGradient id="pieShade" cx="50%" cy="50%" r="50%" fx="50%" fy="50%">
+            <Stop offset="0" stopColor="#000000" stopOpacity="0" />
+            <Stop offset="0.85" stopColor="#000000" stopOpacity="0" />
+            <Stop offset="1" stopColor="#000000" stopOpacity="0.07" />
+          </RadialGradient>
+        </Defs>
+
+        {/* Slices */}
+        {slices}
+
+        {/* Inner shadow ring for soft depth on the outer rim */}
+        <Circle
+          cx={cx}
+          cy={cy}
+          r={rOuter}
+          fill="url(#pieShade)"
+          stroke="none"
+          pointerEvents="none"
+        />
+
+        {/* Center label — total count + filter name */}
         <SvgText
           x={cx}
-          y={cy - 4}
-          fontSize="22"
-          fill={theme.t1}
+          y={cy - 2}
+          fontSize="26"
           fontWeight="700"
+          fill={totalColor}
           textAnchor="middle"
         >
           {total}
         </SvgText>
-        <SvgText x={cx} y={cy + 12} fontSize="10" fill={theme.t5} textAnchor="middle">
-          Contacts
+        <SvgText
+          x={cx}
+          y={cy + 16}
+          fontSize="10"
+          fontWeight="600"
+          fill={labelColor}
+          textAnchor="middle"
+          letterSpacing={0.6}
+        >
+          {(filterLabel || 'Total').toUpperCase()}
         </SvgText>
       </Svg>
     </View>

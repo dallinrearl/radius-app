@@ -114,8 +114,8 @@ export default function ContactsScreen({
           return (b.lastContacted || '').localeCompare(a.lastContacted || '');
         if (sort === 'added') return Number(b.id) - Number(a.id);
         if (sort === 'overdue') {
-          const aN = nextDate(a.lastContacted, a.freq);
-          const bN = nextDate(b.lastContacted, b.freq);
+          const aN = nextDate(a.lastContacted, a.freq, a.freqStartedAt, a.freqDayOfWeek);
+          const bN = nextDate(b.lastContacted, b.freq, b.freqStartedAt, b.freqDayOfWeek);
           return (aN || '9999').localeCompare(bN || '9999');
         }
         return 0;
@@ -585,7 +585,7 @@ export default function ContactsScreen({
 }
 
 function ContactRow({ contact, onPress, theme }) {
-  const nd = nextDate(contact.lastContacted, contact.freq);
+  const nd = nextDate(contact.lastContacted, contact.freq, contact.freqStartedAt, contact.freqDayOfWeek);
   const diff = nd ? daysUntil(nd) : null;
   const badge =
     diff !== null
@@ -627,7 +627,7 @@ function ContactRow({ contact, onPress, theme }) {
 }
 
 function ContactRowFull({ contact, onPress, theme }) {
-  const nd = nextDate(contact.lastContacted, contact.freq);
+  const nd = nextDate(contact.lastContacted, contact.freq, contact.freqStartedAt, contact.freqDayOfWeek);
   const diff = nd ? daysUntil(nd) : null;
   const badge =
     diff !== null
@@ -712,20 +712,20 @@ function NotificationInbox({ contacts, onPickContact, onClose, onLogToday }) {
   const { theme } = useTheme();
   const overdueList = contacts
     .filter((c) => {
-      const nd = nextDate(c.lastContacted, c.freq);
+      const nd = nextDate(c.lastContacted, c.freq, c.freqStartedAt, c.freqDayOfWeek);
       return nd && daysUntil(nd) < 0;
     })
     .sort((a, b) => {
-      const aN = nextDate(a.lastContacted, a.freq);
-      const bN = nextDate(b.lastContacted, b.freq);
+      const aN = nextDate(a.lastContacted, a.freq, a.freqStartedAt, a.freqDayOfWeek);
+      const bN = nextDate(b.lastContacted, b.freq, b.freqStartedAt, b.freqDayOfWeek);
       return (aN || '').localeCompare(bN || '');
     });
   const todayList = contacts.filter((c) => {
-    const nd = nextDate(c.lastContacted, c.freq);
+    const nd = nextDate(c.lastContacted, c.freq, c.freqStartedAt, c.freqDayOfWeek);
     return nd && daysUntil(nd) === 0;
   });
   const weekList = contacts.filter((c) => {
-    const nd = nextDate(c.lastContacted, c.freq);
+    const nd = nextDate(c.lastContacted, c.freq, c.freqStartedAt, c.freqDayOfWeek);
     const d = nd ? daysUntil(nd) : null;
     return d !== null && d > 0 && d <= 7;
   });
@@ -779,7 +779,7 @@ function NotificationInbox({ contacts, onPickContact, onClose, onLogToday }) {
               Overdue ({overdueList.length})
             </Text>
             {overdueList.slice(0, 5).map((c) => {
-              const nd = nextDate(c.lastContacted, c.freq);
+              const nd = nextDate(c.lastContacted, c.freq, c.freqStartedAt, c.freqDayOfWeek);
               const d = Math.abs(daysUntil(nd));
               return (
                 <TouchableOpacity
@@ -877,7 +877,7 @@ function NotificationInbox({ contacts, onPickContact, onClose, onLogToday }) {
               This Week ({weekList.length})
             </Text>
             {weekList.map((c) => {
-              const nd = nextDate(c.lastContacted, c.freq);
+              const nd = nextDate(c.lastContacted, c.freq, c.freqStartedAt, c.freqDayOfWeek);
               const d = daysUntil(nd);
               return (
                 <TouchableOpacity

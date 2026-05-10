@@ -280,6 +280,17 @@ function getCopy(reason) {
       ],
     };
   }
+  if (reason === 'ai_outreaches') {
+    return {
+      headline: 'AI Outreach Suggestions',
+      body: 'Let AI surface 2-5 people in your network who deserve a check-in right now, with specific reasons why.',
+      features: [
+        'Smart relationship intelligence across your contacts',
+        'Catches stagnant high-priority relationships',
+        'Surfaces upcoming birthdays, anniversaries, and follow-ups',
+      ],
+    };
+  }
   return {
     headline: 'Upgrade to Pro',
     body: 'Unlock unlimited AI features and the full Radius experience.',

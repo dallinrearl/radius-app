@@ -29,6 +29,8 @@ import {
   parseLegacyDate,
   dateObjectIsEmpty,
   isoToday,
+  DAYS_OF_WEEK,
+  dowOf,
 } from '../utils/helpers';
 import {
   Section,
@@ -73,7 +75,7 @@ export default function ContactForm({
 }) {
   const { theme } = useTheme();
   const insets = useSafeAreaInsets();
-  const nd = nextDate(form.lastContacted, form.freq);
+  const nd = nextDate(form.lastContacted, form.freq, form.freqStartedAt, form.freqDayOfWeek);
   const ndDiff = nd ? daysUntil(nd) : null;
 
   // ---------- One-time form normalization on open ----------
@@ -458,7 +460,29 @@ export default function ContactForm({
                   return (
                     <TouchableOpacity
                       key={o.v}
-                      onPress={() => setForm((f) => ({ ...f, freq: o.v }))}
+                      onPress={() =>
+                        setForm((f) => {
+                          const next = { ...f, freq: o.v };
+                          // When picking a real frequency for the first time,
+                          // stamp freqStartedAt so the contact appears in
+                          // Next Up even without prior log history. Also
+                          // default freqDayOfWeek to today so weekly users
+                          // get a sensible cadence anchor.
+                          if (o.v && o.v !== 'never') {
+                            if (!f.freqStartedAt) {
+                              next.freqStartedAt = isoToday();
+                            }
+                            if (o.v === '1week' && f.freqDayOfWeek == null) {
+                              next.freqDayOfWeek = new Date().getDay();
+                            }
+                          } else {
+                            // 'never' clears the schedule fields.
+                            next.freqStartedAt = '';
+                            next.freqDayOfWeek = null;
+                          }
+                          return next;
+                        })
+                      }
                       style={{
                         paddingHorizontal: 12,
                         paddingVertical: 8,
@@ -481,6 +505,40 @@ export default function ContactForm({
                   );
                 })}
               </View>
+
+              {/* Day-of-week picker, shown only for weekly cadence. Defaults
+                  to the day frequency was set on. */}
+              {form.freq === '1week' && (
+                <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 8 }}>
+                  {DAYS_OF_WEEK.map((d) => {
+                    const on = form.freqDayOfWeek === d.v;
+                    return (
+                      <TouchableOpacity
+                        key={d.v}
+                        onPress={() => setForm((f) => ({ ...f, freqDayOfWeek: d.v }))}
+                        style={{
+                          paddingHorizontal: 10,
+                          paddingVertical: 6,
+                          borderRadius: 8,
+                          borderWidth: 1,
+                          backgroundColor: on ? theme.bgAc : theme.bg3,
+                          borderColor: on ? theme.ac : theme.brd,
+                        }}
+                      >
+                        <Text
+                          style={{
+                            fontSize: 10,
+                            color: on ? theme.ac : theme.t5,
+                            fontWeight: '600',
+                          }}
+                        >
+                          {d.s}
+                        </Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+              )}
             </Field>
             {nd && (
               <Text

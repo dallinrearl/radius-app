@@ -53,6 +53,22 @@ function isUuid(s) {
   return typeof s === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s);
 }
 
+// Generate a fresh v4 UUID. Used for new contacts so we always send a valid
+// UUID to Supabase rather than relying on column defaults (which may or may
+// not be set up). Falls back to a manual generator if crypto.randomUUID
+// isn't available (older Hermes versions).
+function generateUuid() {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  // RFC 4122-ish v4 fallback
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    const v = c === 'x' ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
+}
+
 // Translate a contact from local app shape into the DB row shape.
 function toDb(contact, userId) {
   const row = {
@@ -96,11 +112,15 @@ function toDb(contact, userId) {
       sampleAddedAt: contact.sampleAddedAt || null,
     },
   };
-  // Only include id if it's a real UUID. Skips local sample IDs ('s1') and
-  // legacy timestamp IDs (Date.now()). Without this Supabase rejects the row
-  // with "invalid input syntax for type uuid".
+  // Always include id. If the contact has a real UUID already, use it (so
+  // upsert updates the existing row). If not, generate a fresh UUID — that
+  // way we send a valid id to Postgres regardless of column defaults.
+  // Skips local sample IDs ('s1') and legacy timestamp IDs (Date.now())
+  // by detecting them via isUuid and replacing rather than passing through.
   if (isUuid(contact.id)) {
     row.id = contact.id;
+  } else {
+    row.id = generateUuid();
   }
   return row;
 }
@@ -122,8 +142,23 @@ export async function fetchContacts() {
 
 // Sync a full local contacts array to Supabase.
 // Figures out what to insert, update, or delete by comparing IDs.
+// Returns true if a contact is a "sample" — local-only, never synced to
+// Supabase. Sample IDs start with 'sample_' (per constants.js getSampleContacts).
+// We also fence on isSample as a belt-and-suspenders check.
+function isSampleContact(c) {
+  return !!(c && (c.isSample || (typeof c.id === 'string' && c.id.startsWith('sample_'))));
+}
+
 export async function syncContacts(localContacts, userId) {
   if (!userId) return { ok: false, message: 'Not signed in' };
+
+  // Split out sample contacts. Samples are local-only — never written to
+  // or read from Supabase. Without this fence we'd assign them fresh
+  // UUIDs every save, piling up duplicate cloud rows AND breaking
+  // archive/delete (the post-sync re-fetch would replace our local
+  // state with the cloud rows we shouldn't have created in the first place).
+  const samples = localContacts.filter(isSampleContact);
+  const real = localContacts.filter((c) => !isSampleContact(c));
 
   // 1. Get current cloud contact IDs so we know what to delete
   const { data: existing, error: fetchErr } = await supabase
@@ -135,7 +170,7 @@ export async function syncContacts(localContacts, userId) {
   }
   const cloudIds = new Set((existing || []).map((r) => r.id));
   const localIds = new Set(
-    localContacts
+    real
       .filter((c) => isUuid(c.id))
       .map((c) => c.id),
   );
@@ -150,8 +185,9 @@ export async function syncContacts(localContacts, userId) {
     if (delErr) console.error('delete error:', delErr);
   }
 
-  // 3. Upsert all current local contacts
-  const rows = localContacts.map((c) => toDb(c, userId));
+  // 3. Upsert real contacts (samples skipped). toDb assigns a fresh UUID
+  // to any contact without one, so all rows have a valid id.
+  const rows = real.map((c) => toDb(c, userId));
   if (rows.length > 0) {
     const { error: upsertErr } = await supabase
       .from('contacts')
@@ -162,10 +198,11 @@ export async function syncContacts(localContacts, userId) {
     }
   }
 
-  // 4. Re-fetch so caller has fresh data with real DB IDs
+  // 4. Re-fetch real contacts and merge samples back in. Without this
+  // merge, the post-sync state-set in useAppStore would drop samples.
   try {
     const fresh = await fetchContacts();
-    return { ok: true, contacts: fresh };
+    return { ok: true, contacts: [...samples, ...fresh] };
   } catch (e) {
     // Sync wrote successfully but post-fetch failed. Surface as soft error.
     console.warn('syncContacts post-fetch failed:', e?.message);

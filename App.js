@@ -1,4 +1,4 @@
-import { onAuthChange } from './src/lib/auth';
+import { onAuthChange, signOut } from './src/lib/auth';
 import AuthScreen from './src/screens/AuthScreen';
 import 'react-native-gesture-handler';
 import React, { useState, useEffect, useRef } from 'react';
@@ -19,7 +19,8 @@ import { Toast } from './src/components/Common';
 import LogTouchpointModal from './src/components/LogTouchpointModal';
 import ContactForm from './src/components/ContactForm';
 import PaywallModal from './src/components/PaywallModal';
-import { createCheckoutSession } from './src/lib/stripeApi';
+import TrialBanner from './src/components/TrialBanner';
+import { createCheckoutSession, createPortalSession } from './src/lib/stripeApi';
 
 import ContactsScreen from './src/screens/ContactsScreen';
 import DetailScreen from './src/screens/DetailScreen';
@@ -193,6 +194,28 @@ function AppInner() {
     setTimeout(() => setToast(null), 2200);
   }
 
+  // Sign the user out of Supabase. The onAuthChange listener will pick up
+  // the change and flip user back to null, which routes us to AuthScreen.
+  // No need to manually clear state — the auth gate handles it.
+  async function handleSignOut() {
+    try {
+      if (typeof signOut === 'function') {
+        const result = await signOut();
+        if (result && result.ok === false) {
+          Alert.alert('Sign out failed', result.message || 'Try again.');
+        }
+      } else {
+        Alert.alert(
+          'Sign out unavailable',
+          'No signOut export found in src/lib/auth. Please add one.',
+        );
+      }
+    } catch (e) {
+      console.error('handleSignOut failed:', e?.message);
+      Alert.alert('Sign out failed', e?.message || 'Try again.');
+    }
+  }
+
   // Handles the "Start trial" button on the paywall modal. Asks the Stripe
   // Edge Function to create a checkout session, then opens the URL in the
   // browser. Stripe redirects back via a `radius://` deep link after pay or
@@ -216,8 +239,24 @@ function AppInner() {
     }
   }
 
-  // Listen for deep link returns from Stripe checkout. The Edge Function
-  // sets success_url and cancel_url to radius:// URLs that we intercept here.
+  // Open Stripe Customer Portal so trial users can manage their subscription
+  // before the trial ends. Triggered by the trial banner's Manage button.
+  async function openBillingPortal() {
+    try {
+      const { url } = await createPortalSession();
+      const supported = await Linking.canOpenURL(url);
+      if (supported) {
+        await Linking.openURL(url);
+      } else {
+        Alert.alert('Could not open billing portal', 'Try again later.');
+      }
+    } catch (e) {
+      console.error('openBillingPortal failed:', e?.message);
+      Alert.alert('Could not open billing portal', e?.message || 'Try again later.');
+    }
+  }
+
+  // Listen for deep link returns from Stripe checkout. The Edge Function  // sets success_url and cancel_url to radius:// URLs that we intercept here.
   // On success, refresh the profile so the new tier is reflected.
   useEffect(() => {
     const handleUrl = ({ url }) => {
@@ -244,6 +283,38 @@ function AppInner() {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [theme.ac]);
+
+  // Trial urgency toasts: fire once per threshold per device. Stored in
+  // AsyncStorage so they don't repeat on every app open. Two thresholds:
+  //   - 3 days remaining (warning level): "3 days left in trial. Manage..."
+  //   - 1 day or less remaining (urgent): "Trial ends today. Manage..."
+  // Each fires the FIRST time we observe the user crossing into that
+  // threshold. After that, the banner alone reminds them.
+  useEffect(() => {
+    if (!store.trialActive) return;
+    if (store.trialDaysLeft == null) return;
+    const days = store.trialDaysLeft;
+    (async () => {
+      try {
+        if (days <= 1) {
+          const seen = await AsyncStorage.getItem('crm-trial-toast-1d');
+          if (!seen) {
+            showToast('Trial ends today. Tap Manage to keep Pro.', theme.warn);
+            await AsyncStorage.setItem('crm-trial-toast-1d', 'true');
+          }
+        } else if (days <= 3) {
+          const seen = await AsyncStorage.getItem('crm-trial-toast-3d');
+          if (!seen) {
+            showToast(days + ' days left in trial. Manage anytime.', theme.warn);
+            await AsyncStorage.setItem('crm-trial-toast-3d', 'true');
+          }
+        }
+      } catch (_) {
+        // Toast is a nice-to-have; never block on storage errors.
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [store.trialActive, store.trialDaysLeft]);
 
   function commitContact(updated, skipDupeCheck) {
     const exists = store.contacts.find((c) => c.id === updated.id);
@@ -445,6 +516,18 @@ function AppInner() {
     />
   );
 
+  // Trial banner sits at the very top of the screen for trial users only.
+  // Rendered inline (not as a modal) so it pushes content down rather than
+  // overlaying it. Each screen's return path includes {globalBanner} at the
+  // top of its View wrapper.
+  const globalBanner = (
+    <TrialBanner
+      trialActive={store.trialActive}
+      trialDaysLeft={store.trialDaysLeft}
+      onManage={openBillingPortal}
+    />
+  );
+
   if (!authChecked) {
     return (
       <View style={{ flex: 1, backgroundColor: theme.bg, justifyContent: 'center', alignItems: 'center' }}>
@@ -476,6 +559,7 @@ function AppInner() {
   if (view === 'detail' && selected) {
     return (
       <View style={{ flex: 1, backgroundColor: theme.bg }}>
+        {globalBanner}
         <DetailScreen
           contact={selected}
           onBack={() => {
@@ -504,6 +588,7 @@ function AppInner() {
   if (view === 'edit' && editForm) {
     return (
       <View style={{ flex: 1 }}>
+        {globalBanner}
         <ContactForm
           form={editForm}
           setForm={setEditForm}
@@ -541,6 +626,7 @@ function AppInner() {
   if (view === 'edit_mycard') {
     return (
       <View style={{ flex: 1 }}>
+        {globalBanner}
         <ContactForm
           form={editForm}
           setForm={setEditForm}
@@ -573,6 +659,7 @@ function AppInner() {
   if (view === 'security') {
     return (
       <View style={{ flex: 1 }}>
+        {globalBanner}
         <SecurityScreen
           pin={store.pin}
           onSavePin={store.savePin}
@@ -595,6 +682,7 @@ function AppInner() {
   if (view === 'mailing_lists') {
     return (
       <View style={{ flex: 1 }}>
+        {globalBanner}
         <MailingListsScreen
           mailingLists={store.mailingLists}
           contacts={store.contacts}
@@ -617,6 +705,7 @@ function AppInner() {
     const list = store.mailingLists.find((l) => l.id === selectedListId);
     return (
       <View style={{ flex: 1 }}>
+        {globalBanner}
         <MailingListDetailScreen
           mailingList={list}
           contacts={store.contacts}
@@ -641,6 +730,7 @@ function AppInner() {
   if (view === 'review_queue') {
     return (
       <View style={{ flex: 1 }}>
+        {globalBanner}
         <ReviewQueueScreen
           reviewQueue={store.reviewQueue}
           contacts={store.contacts}
@@ -669,6 +759,7 @@ function AppInner() {
     }
     return (
       <View style={{ flex: 1, backgroundColor: theme.bg }}>
+        {globalBanner}
         <AddScreen
           mode={addMode}
           setMode={(m) => {
@@ -706,6 +797,7 @@ function AppInner() {
 
   return (
     <View style={{ flex: 1, backgroundColor: theme.bg }}>
+      {globalBanner}
       {tab === 'contacts' && (
         <ContactsScreen
           contacts={store.contacts}
@@ -738,6 +830,10 @@ function AppInner() {
           }}
           onLogTouch={openLogModal}
           onSnooze={snoozeContact}
+          myCard={store.myCard}
+          aiUnlocked={store.featureUnlocked('aiOutreaches') || store.effectiveTier !== 'free'}
+          consumeAiCall={store.consumeAiCall}
+          onShowPaywall={store.showPaywall}
         />
       )}
       {tab === 'stats' && <StatsScreen activeContacts={store.activeContacts} />}
@@ -787,6 +883,7 @@ function AppInner() {
           aiRemaining={store.aiRemaining}
           hasStripeCustomer={!!store.profile?.stripe_customer_id}
           onShowPaywall={store.showPaywall}
+          onSignOut={handleSignOut}
         />
       )}
 

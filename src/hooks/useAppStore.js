@@ -557,7 +557,7 @@ export function useAppStore() {
   const activeContacts = contacts.filter((c) => !c.archived);
   const archivedContacts = contacts.filter((c) => c.archived);
   const overdueN = activeContacts.filter((c) => {
-    const nd = nextDate(c.lastContacted, c.freq);
+    const nd = nextDate(c.lastContacted, c.freq, c.freqStartedAt, c.freqDayOfWeek);
     return nd && daysUntil(nd) < 0;
   }).length;
 

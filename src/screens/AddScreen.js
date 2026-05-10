@@ -242,7 +242,35 @@ function VoiceCapture({ onComplete, onBack }) {
     setExtracting(true);
     const fields = await aiExtractFromVoice(transcript);
     setExtracting(false);
-    onComplete({ ...EMPTY_CONTACT, ...fields });
+
+    // Pull touchpoint out of the AI result so it doesn't pollute the
+    // contact form. The full transcript goes to ONE of two places:
+    //   - touchpoint exists → convLog entry, notes stays empty
+    //   - touchpoint is null → notes field, convLog stays empty
+    // Either way the user has the verbatim transcript preserved.
+    const { touchpoint, ...formFields } = fields;
+    const seed = { ...EMPTY_CONTACT, ...formFields };
+
+    if (touchpoint) {
+      const entry = {
+        id: 'voice_' + Date.now(),
+        date: touchpoint.date,
+        type: touchpoint.type,
+        text: transcript.trim(),
+      };
+      seed.convLog = [entry, ...(seed.convLog || [])];
+      // Anchor frequency math to when they actually interacted.
+      seed.lastContacted = touchpoint.date;
+      // Touchpoint owns the transcript. Clear notes so it isn't duplicated.
+      seed.notes = '';
+    } else {
+      // No interaction described — keep transcript in notes (already set
+      // by the AI extraction's verbatim notes field). Make sure convLog
+      // is empty so the user doesn't see a phantom log entry.
+      seed.convLog = [];
+    }
+
+    onComplete(seed);
   }
 
   return (

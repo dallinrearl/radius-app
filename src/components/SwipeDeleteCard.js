@@ -1,9 +1,37 @@
 import React, { useRef } from 'react';
-import { View, Text, TouchableOpacity, Animated, PanResponder, Alert } from 'react-native';
+import {
+  View,
+  Text,
+  TouchableOpacity,
+  Animated,
+  PanResponder,
+  Alert,
+  Platform,
+  Pressable,
+} from 'react-native';
 import { useTheme } from '../styles/theme';
 import { ArchiveIcon, ChatIcon } from './Icons';
 
-const THRESHOLD = 80;
+const THRESHOLD = 60;
+
+// Cross-platform confirm. Alert.alert is iOS/Android only — silently no-ops
+// on web. We swap to window.confirm there so the destructive action can
+// actually fire when the user taps Archive on a swiped card.
+function confirmAction(title, message, onConfirm, onCancel) {
+  if (Platform.OS === 'web') {
+    if (typeof window !== 'undefined' && window.confirm) {
+      if (window.confirm(message || title)) onConfirm();
+      else if (onCancel) onCancel();
+    } else {
+      onConfirm();
+    }
+    return;
+  }
+  Alert.alert(title, message, [
+    { text: 'Cancel', style: 'cancel', onPress: onCancel },
+    { text: 'Archive', style: 'destructive', onPress: onConfirm },
+  ]);
+}
 
 export default function SwipeDeleteCard({ children, onDelete, onLog, contactName }) {
   const { theme } = useTheme();
@@ -21,7 +49,6 @@ export default function SwipeDeleteCard({ children, onDelete, onLog, contactName
       },
       onPanResponderMove: (_, g) => {
         let v = g.dx;
-        // Limit overshoot
         if (v < -120) v = -120 + (v + 120) * 0.2;
         if (v > 120) v = 120 + (v - 120) * 0.2;
         tx.setValue(v);
@@ -29,10 +56,8 @@ export default function SwipeDeleteCard({ children, onDelete, onLog, contactName
       onPanResponderRelease: (_, g) => {
         lock.current = null;
         if (g.dx < -THRESHOLD) {
-          // Reveal archive button (snap left)
           Animated.spring(tx, { toValue: -80, useNativeDriver: true, bounciness: 0 }).start();
         } else if (g.dx > THRESHOLD && onLog) {
-          // Trigger log action
           Animated.timing(tx, { toValue: 0, duration: 180, useNativeDriver: true }).start();
           onLog();
         } else {
@@ -49,17 +74,28 @@ export default function SwipeDeleteCard({ children, onDelete, onLog, contactName
   const reset = () => Animated.spring(tx, { toValue: 0, useNativeDriver: true }).start();
 
   const handleArchive = () => {
-    Alert.alert('Archive contact', 'Archive ' + contactName + '?', [
-      { text: 'Cancel', style: 'cancel', onPress: reset },
-      {
-        text: 'Archive',
-        style: 'destructive',
-        onPress: () => {
-          onDelete();
-          reset();
-        },
+    confirmAction(
+      'Archive contact',
+      'Archive ' + contactName + '?',
+      () => {
+        onDelete();
+        reset();
       },
-    ]);
+      reset,
+    );
+  };
+
+  // Long-press fallback: works everywhere, especially useful on web where
+  // PanResponder swipe gestures with a mouse can be flaky. 600ms feels
+  // intentional but not annoying.
+  const handleLongPress = () => {
+    confirmAction(
+      'Archive contact',
+      'Archive ' + contactName + '?',
+      () => {
+        onDelete();
+      },
+    );
   };
 
   return (
@@ -112,7 +148,19 @@ export default function SwipeDeleteCard({ children, onDelete, onLog, contactName
           transform: [{ translateX: tx }],
         }}
       >
-        {children}
+        {/* Pressable wrapper enables long-press archive. delayLongPress at
+            600ms is the platform default and feels intentional. We don't
+            register an onPress so the underlying ContactRowFull TouchableOpacity
+            still handles regular taps for navigation. */}
+        <Pressable
+          onLongPress={handleLongPress}
+          delayLongPress={600}
+          // Don't capture the regular press — let it bubble to the row's
+          // own TouchableOpacity below.
+          android_ripple={null}
+        >
+          {children}
+        </Pressable>
       </Animated.View>
     </View>
   );
