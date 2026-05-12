@@ -279,6 +279,7 @@ export const TOUCH_TYPES = [
   { v: 'text', l: 'Text', c: '#7B5EEA' },
   { v: 'meeting', l: 'In Person', c: '#F4A261' },
   { v: 'linkedin', l: 'LinkedIn', c: '#0077B6' },
+  { v: 'gift', l: 'Gift', c: '#E76F8E' },
   { v: 'other', l: 'Other', c: '#6A8098' },
 ];
 
@@ -289,6 +290,30 @@ export const TEMPLATE_TYPES = [
   { v: 'intro_req', l: 'Ask for Intro', desc: 'Request a warm introduction' },
   { v: 'share', l: 'Share Value', desc: 'Send something useful' },
 ];
+
+// ---------- Gift Vault ----------
+//
+// Predefined gift categories shown as filter pills in the Gift Vault
+// screen. The 'custom' bucket catches anything that doesn't fit a
+// specific occasion.
+
+export const GIFT_CATEGORIES = [
+  { v: 'baby',      l: 'New Baby',  c: '#F4A8C8' },
+  { v: 'birthday',  l: 'Birthday',  c: '#F4A261' },
+  { v: 'wedding',   l: 'Wedding',   c: '#7B5EEA' },
+  { v: 'sympathy',  l: 'Sympathy',  c: '#6A8098' },
+  { v: 'thank_you', l: 'Thank You', c: '#00C9A7' },
+  { v: 'custom',    l: 'Custom',    c: '#48B8E0' },
+];
+
+// Look up a category record by its `v` value. Falls back to 'custom'
+// so callers never get undefined.
+export function giftCategoryMeta(value) {
+  return (
+    GIFT_CATEGORIES.find((c) => c.v === value) ||
+    GIFT_CATEGORIES[GIFT_CATEGORIES.length - 1]
+  );
+}
 
 // ---------- Sample contacts ----------
 //

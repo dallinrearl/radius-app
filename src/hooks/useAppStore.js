@@ -29,12 +29,42 @@ const HOLIDAY_LIST_ID = 'holiday_card_list';
 // will migrate to Supabase user_settings when Stage 2 cron arrives.
 const REVIEW_QUEUE_STORAGE = 'crm-review-queue';
 
+// AsyncStorage keys for gift vault. Local-only for now, mirrors the
+// mailing-list pattern. Will move to Supabase post-launch.
+const GIFTS_STORAGE = 'crm-gifts';
+const GIFT_GROUPS_STORAGE = 'crm-gift-groups';
+
 function newMailingList(name) {
   return {
     id: 'list_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6),
     name: name || 'Untitled List',
     createdAt: new Date().toISOString(),
     addressOverrides: {},
+  };
+}
+
+// Factory for a new gift entry. Categories match the predefined set:
+// 'baby' | 'birthday' | 'wedding' | 'sympathy' | 'thank_you' | 'custom'
+function newGift({ name, url, notes, category, photo } = {}) {
+  return {
+    id: 'gift_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6),
+    name: (name || '').trim(),
+    url: (url || '').trim(),
+    notes: (notes || '').trim(),
+    category: category || 'custom',
+    photo: photo || '',
+    createdAt: new Date().toISOString(),
+  };
+}
+
+// Factory for a gift group (a curated bundle of gift IDs).
+function newGiftGroup({ name, category, giftIds } = {}) {
+  return {
+    id: 'group_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6),
+    name: (name || 'Untitled Group').trim(),
+    category: category || 'custom',
+    giftIds: Array.isArray(giftIds) ? giftIds : [],
+    createdAt: new Date().toISOString(),
   };
 }
 
@@ -64,6 +94,12 @@ export function useAppStore() {
   // Granola review queue. Items needing user triage (name-only matches,
   // unmatched attendees). Persisted to AsyncStorage for now.
   const [reviewQueue, setReviewQueue] = useState([]);
+
+  // Gift vault state. `gifts` = individual saved links. `giftGroups` =
+  // bundles that reference gifts by id (e.g. "Baby Shower Bundle" with
+  // a teether, a swaddle, and a book).
+  const [gifts, setGifts] = useState([]);
+  const [giftGroups, setGiftGroups] = useState([]);
 
   const [loaded, setLoaded] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -239,6 +275,22 @@ export function useAppStore() {
         if (r?.value) {
           const parsed = JSON.parse(r.value);
           if (Array.isArray(parsed)) setReviewQueue(parsed);
+        }
+      } catch (_) {}
+
+      // Load gifts and gift groups. Both arrays are local-only for now.
+      try {
+        const r = await storage.get(GIFTS_STORAGE);
+        if (r?.value) {
+          const parsed = JSON.parse(r.value);
+          if (Array.isArray(parsed)) setGifts(parsed);
+        }
+      } catch (_) {}
+      try {
+        const r = await storage.get(GIFT_GROUPS_STORAGE);
+        if (r?.value) {
+          const parsed = JSON.parse(r.value);
+          if (Array.isArray(parsed)) setGiftGroups(parsed);
         }
       } catch (_) {}
 
@@ -466,6 +518,101 @@ export function useAppStore() {
     await persistReviewQueue([]);
   }, [persistReviewQueue]);
 
+  // ---------- Gift Vault CRUD ----------
+  //
+  // Gifts are individual saved links (Amazon, Etsy, etc) with optional
+  // notes and a category. Gift groups are curated bundles that reference
+  // gifts by id. Both are local-only for now.
+
+  const persistGifts = useCallback(async (next) => {
+    setGifts(next);
+    try {
+      await storage.set(GIFTS_STORAGE, JSON.stringify(next));
+    } catch (_) {}
+  }, []);
+
+  const persistGiftGroups = useCallback(async (next) => {
+    setGiftGroups(next);
+    try {
+      await storage.set(GIFT_GROUPS_STORAGE, JSON.stringify(next));
+    } catch (_) {}
+  }, []);
+
+  const createGift = useCallback(
+    async (data) => {
+      const gift = newGift(data);
+      await persistGifts([...gifts, gift]);
+      return gift;
+    },
+    [gifts, persistGifts],
+  );
+
+  const updateGift = useCallback(
+    async (id, patch) => {
+      const next = gifts.map((g) => (g.id === id ? { ...g, ...patch } : g));
+      await persistGifts(next);
+    },
+    [gifts, persistGifts],
+  );
+
+  const deleteGift = useCallback(
+    async (id) => {
+      // Remove the gift itself.
+      const nextGifts = gifts.filter((g) => g.id !== id);
+      await persistGifts(nextGifts);
+      // Also strip the id from any group that referenced it, so groups
+      // never point to a dangling gift.
+      const nextGroups = giftGroups.map((grp) => {
+        if (!Array.isArray(grp.giftIds) || !grp.giftIds.includes(id)) return grp;
+        return { ...grp, giftIds: grp.giftIds.filter((x) => x !== id) };
+      });
+      const touched = nextGroups.some((g, i) => g !== giftGroups[i]);
+      if (touched) await persistGiftGroups(nextGroups);
+    },
+    [gifts, persistGifts, giftGroups, persistGiftGroups],
+  );
+
+  const createGiftGroup = useCallback(
+    async (data) => {
+      const group = newGiftGroup(data);
+      await persistGiftGroups([...giftGroups, group]);
+      return group;
+    },
+    [giftGroups, persistGiftGroups],
+  );
+
+  const updateGiftGroup = useCallback(
+    async (id, patch) => {
+      const next = giftGroups.map((g) => (g.id === id ? { ...g, ...patch } : g));
+      await persistGiftGroups(next);
+    },
+    [giftGroups, persistGiftGroups],
+  );
+
+  const deleteGiftGroup = useCallback(
+    async (id) => {
+      const next = giftGroups.filter((g) => g.id !== id);
+      await persistGiftGroups(next);
+    },
+    [giftGroups, persistGiftGroups],
+  );
+
+  // Toggle a gift's membership in a group. Used by the group editor.
+  const toggleGiftInGroup = useCallback(
+    async (groupId, giftId) => {
+      const next = giftGroups.map((g) => {
+        if (g.id !== groupId) return g;
+        const ids = Array.isArray(g.giftIds) ? g.giftIds : [];
+        const updated = ids.includes(giftId)
+          ? ids.filter((x) => x !== giftId)
+          : [...ids, giftId];
+        return { ...g, giftIds: updated };
+      });
+      await persistGiftGroups(next);
+    },
+    [giftGroups, persistGiftGroups],
+  );
+
   const allTags = [...MASTER_TAG_LABELS, ...customTags];
   const visibleTags = allTags.filter((t) => !hiddenTags.includes(t));
 
@@ -641,6 +788,16 @@ export function useAppStore() {
     samplesBannerDismissed,
     mailingLists,
     reviewQueue,
+    // ---------- Gift Vault ----------
+    gifts,
+    giftGroups,
+    createGift,
+    updateGift,
+    deleteGift,
+    createGiftGroup,
+    updateGiftGroup,
+    deleteGiftGroup,
+    toggleGiftInGroup,
     loaded,
     saving,
     contactsFetchError,
