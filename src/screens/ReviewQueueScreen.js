@@ -97,7 +97,7 @@ export default function ReviewQueueScreen({
 
       let extracted = '';
       try {
-        extracted = await aiExtractMeetingNote(contact, rawText);
+        extracted = await aiExtractMeetingNote(contact, rawText, myCard);
       } catch (e) {
         console.warn('aiExtractMeetingNote failed:', e?.message);
         extracted =

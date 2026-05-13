@@ -429,44 +429,74 @@ export async function aiTemplate(contact, type) {
 // Returns a string. The caller wraps it in a convLog entry with date
 // and type.
 
-export async function aiExtractMeetingNote(contact, rawText) {
+export async function aiExtractMeetingNote(contact, rawText, myCard) {
   if (!rawText?.trim()) {
     throw new Error('No text provided');
   }
   const summary = summarizeContact(contact);
+
+  const userName = (myCard?.name || '').trim();
+  const userCompany = (myCard?.company || '').trim();
+  const userRole = (myCard?.role || '').trim();
+  const userIdLine = userName
+    ? `The user (the person logging this note) is ${userName}` +
+      (userRole ? `, ${userRole}` : '') +
+      (userCompany ? ` at ${userCompany}` : '') + '. ' +
+      `The user is NOT the contact. Do not extract facts about the user as if ` +
+      `they were facts about the contact.`
+    : `The user is the person logging this note. They are NOT the contact. ` +
+      `Do not extract facts about the user as if they were facts about the contact.`;
+
+  const contactName = (contact?.name || '').trim() || 'the contact';
+
   const system =
     `You extract a clean, focused meeting log entry from raw meeting ` +
     `notes. The notes might come from Granola, Otter, Fireflies, Zoom ` +
     `AI Companion, an email summary, or just typed text. They might ` +
     `cover a 1-on-1 or a multi-person meeting. Your job is to capture ` +
-    `what's relevant ABOUT THIS SPECIFIC CONTACT.
+    `what's relevant ABOUT THE CONTACT (not the user).
 
-WHO THIS IS FOR:
-The user is logging this conversation against ONE contact in their ` +
-    `personal CRM. The contact is named in the summary. If the meeting ` +
-    `had multiple people, focus on this contact's contributions, ` +
-    `requests, life details mentioned, etc. Filter out anything ` +
-    `irrelevant to this contact.
+WHO IS WHO:
+${userIdLine}
+The contact this log entry is for is ${contactName}. You are extracting ` +
+    `what ${contactName} said, did, revealed, or committed to — NOT what the ` +
+    `user said about themselves.
 
-WHAT TO CAPTURE:
-- What was discussed that involves this contact
-- Anything THEY said about their life, family, work, health, ` +
+INTERPRETING SPEAKERS:
+- First-person statements ("I", "my", "we" where "we" means the user's side) ` +
+    `in the transcript are the USER speaking, not the contact. Do NOT attribute ` +
+    `those facts to the contact.
+- When a speaker is labeled by name, match it to the right person. If the ` +
+    `transcript only labels speakers as "Speaker A / Speaker B", infer from ` +
+    `context which one is ${contactName} (the one being asked about, the one ` +
+    `whose company/role/family details match the contact info above) and which ` +
+    `is the user.
+- If you genuinely can't tell who said something, leave it out rather than ` +
+    `guessing.
+
+WHAT TO CAPTURE (about the contact, ${contactName}):
+- What ${contactName} said about their life, family, work, health, ` +
     `interests, plans, vacations, food preferences, etc.
-- Open threads or follow-ups: things they want from you, things you ` +
-    `said you'd send, things either of you mentioned would happen ` +
-    `next ("we'll close on the deal next month", "I'll introduce you ` +
-    `to my friend in Denver")
-- Decisions made, opinions expressed, news shared
+- What ${contactName} revealed about themselves, their company, their team, ` +
+    `their deals, their goals.
+- Open threads or follow-ups: things ${contactName} wants from the user, ` +
+    `things the user committed to send them, things either side said would ` +
+    `happen next.
+- Decisions ${contactName} made, opinions they expressed, news they shared.
 
 WHAT TO LEAVE OUT:
-- Filler, small talk, "how are you" pleasantries
-- Stuff said by other meeting attendees that doesn't involve this contact
+- Anything that is actually the USER talking about themselves, their own ` +
+    `family, their own job, their own plans. Those are not facts about the contact.
+- Filler, small talk, "how are you" pleasantries.
+- Stuff said by other meeting attendees (not the contact, not the user) that ` +
+    `doesn't involve the contact.
 - Verbatim transcript style. Compress everything into prose.
 
 STYLE:
 - Plain prose. NOT bullets. Run-on log style is fine.
 - 3-8 sentences. Tight.
-- Past tense. Third person about the contact ("Marcus mentioned...", "He said...").
+- Past tense. Third person about the contact ("${contactName} mentioned...", ` +
+    `"He said...", "She shared...").
 - Pull out specific concrete details when they exist. If they ` +
     `mentioned their daughter starting at Brown next year, write ` +
     `that. If they mentioned closing on a deal next month, write that.
@@ -479,7 +509,9 @@ ${HONESTY_RULES}`;
   const prompt =
     `Contact this log entry is for:\n\n${summary}\n\n` +
     `Raw meeting content:\n\n${rawText}\n\n` +
-    `Extract a clean log entry focused on what's relevant to this contact.`;
+    `Extract a clean log entry focused on what ${contactName} said and ` +
+    `revealed. Remember: first-person "I" in the transcript is the user, ` +
+    `not the contact.`;
   return callClaude({ system, prompt, max_tokens: 600 });
 }
 

@@ -145,7 +145,7 @@ export async function runGranolaSync({
         // Free users: save the raw Granola note as-is (no Claude extraction).
         // Pro users: run Claude to extract a contact-targeted note.
         const extracted = granolaAiUnlocked
-          ? await aiExtractMeetingNote(contact, rawText)
+          ? await aiExtractMeetingNote(contact, rawText, myCard)
           : (rawText || '').trim() || meetingTitle;
         const entry = {
           id: 'granola_' + note.id + '_' + contact.id,
