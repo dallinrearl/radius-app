@@ -95,17 +95,22 @@ export default function ReviewQueueScreen({
       const rawText = item.rawText || '';
       const transcriptText = item.rawTranscript || '';
 
+      const fallbackText =
+        (rawText || '').trim() ||
+        (transcriptText || '').trim() ||
+        ('Meeting: ' + (item.meetingTitle || 'Untitled') + ' on ' + fmtDate(date));
+
       let extracted = '';
-      try {
-        extracted = await aiExtractMeetingNote(contact, rawText, myCard);
-      } catch (e) {
-        console.warn('aiExtractMeetingNote failed:', e?.message);
-        extracted =
-          'Imported from meeting "' +
-          (item.meetingTitle || 'Untitled') +
-          '" on ' +
-          fmtDate(date) +
-          '. (AI extraction failed; transcript saved on entry.)';
+      if (granolaAiUnlocked) {
+        try {
+          extracted = await aiExtractMeetingNote(contact, rawText, myCard);
+          if (!extracted?.trim()) extracted = fallbackText;
+        } catch (e) {
+          console.warn('aiExtractMeetingNote failed:', e?.message);
+          extracted = fallbackText;
+        }
+      } else {
+        extracted = fallbackText;
       }
 
       const entry = {
