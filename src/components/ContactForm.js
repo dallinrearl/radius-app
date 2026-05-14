@@ -1,4 +1,4 @@
-import React, { useEffect } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   View,
   Text,
@@ -19,6 +19,7 @@ import {
   emptyPhone,
   emptyEmail,
   emptyAddress,
+  getDisplayName,
 } from '../constants';
 import {
   fmtPhone,
@@ -78,11 +79,70 @@ export default function ContactForm({
   const nd = nextDate(form.lastContacted, form.freq, form.freqStartedAt, form.freqDayOfWeek);
   const ndDiff = nd ? daysUntil(nd) : null;
 
+  // Local UI state for collapsing/expanding sections that should default closed.
+  const [addressesExpanded, setAddressesExpanded] = useState(false);
+  // Whether the custom one-off follow-up date picker is showing. Auto-opens
+  // when the form already has a customFollowUpDate set.
+  const [customDateOpen, setCustomDateOpen] = useState(false);
+
   // ---------- One-time form normalization on open ----------
   useEffect(() => {
     setForm((f) => {
       const next = { ...f };
       let changed = false;
+
+      // Split legacy `name` into firstName/lastName if needed.
+      if (typeof next.firstName !== 'string') {
+        next.firstName = '';
+        changed = true;
+      }
+      if (typeof next.lastName !== 'string') {
+        next.lastName = '';
+        changed = true;
+      }
+      if (!next.firstName && !next.lastName && typeof next.name === 'string' && next.name.trim()) {
+        const trimmed = next.name.trim();
+        const idx = trimmed.indexOf(' ');
+        if (idx < 0) {
+          next.firstName = trimmed;
+        } else {
+          next.firstName = trimmed.slice(0, idx);
+          next.lastName = trimmed.slice(idx + 1).trim();
+        }
+        changed = true;
+      }
+
+      // Rename legacy howMet -> initialIntroduction.
+      if (typeof next.initialIntroduction !== 'string') {
+        next.initialIntroduction = typeof next.howMet === 'string' ? next.howMet : '';
+        changed = true;
+      }
+      if ('howMet' in next) {
+        delete next.howMet;
+        changed = true;
+      }
+      // Drop removed fields if present.
+      if ('howHelp' in next) {
+        delete next.howHelp;
+        changed = true;
+      }
+      if ('topics' in next) {
+        delete next.topics;
+        changed = true;
+      }
+      if ('linkedin' in next) {
+        delete next.linkedin;
+        changed = true;
+      }
+
+      if (typeof next.customFollowUpDate !== 'string') {
+        next.customFollowUpDate = '';
+        changed = true;
+      }
+      if (typeof next.notes !== 'string') {
+        next.notes = '';
+        changed = true;
+      }
 
       if (!Array.isArray(next.phones)) {
         next.phones = [];
@@ -114,10 +174,8 @@ export default function ContactForm({
         next.addresses = [];
         changed = true;
       }
-      if (!next.id && next.addresses.length === 0) {
-        next.addresses = [emptyAddress()];
-        changed = true;
-      }
+      // Addresses no longer auto-seed an empty one. They're hidden behind
+      // an "Add an address" button now.
 
       if (!Array.isArray(next.mailingLists)) {
         next.mailingLists = [];
@@ -125,7 +183,6 @@ export default function ContactForm({
       }
 
       // Migrate legacy birthday/anniversary strings to date objects.
-      // Leaves objects untouched. Empty strings become null.
       if (typeof next.birthday === 'string') {
         next.birthday = parseLegacyDate(next.birthday);
         changed = true;
@@ -140,11 +197,26 @@ export default function ContactForm({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [form?.id]);
 
+  // Auto-expand addresses if there are any saved on this contact, and
+  // auto-open the custom follow-up picker if a date is already set.
+  useEffect(() => {
+    if (Array.isArray(form.addresses) && form.addresses.length > 0) {
+      setAddressesExpanded(true);
+    }
+    if (form.customFollowUpDate) {
+      setCustomDateOpen(true);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [form?.id]);
+
   const phones = Array.isArray(form.phones) ? form.phones : [];
   const emails = Array.isArray(form.emails) ? form.emails : [];
   const addresses = Array.isArray(form.addresses) ? form.addresses : [];
   const formMailingLists = Array.isArray(form.mailingLists) ? form.mailingLists : [];
   const availableLists = Array.isArray(mailingLists) ? mailingLists : [];
+
+  // Composed display name for things like vcf export and "Defaults to ..." copy.
+  const displayName = getDisplayName(form);
 
   function updatePhones(next) {
     setForm((f) => ({
@@ -173,10 +245,15 @@ export default function ContactForm({
     });
   }
 
+  function addFirstAddress() {
+    updateAddresses([emptyAddress()]);
+    setAddressesExpanded(true);
+  }
+
   async function exportVcf() {
     try {
       const vcf = makeVcf(form);
-      const filename = (form.name || 'contact').replace(/\s+/g, '_') + '.vcf';
+      const filename = (displayName || 'contact').replace(/\s+/g, '_') + '.vcf';
       const path = FileSystem.cacheDirectory + filename;
       await FileSystem.writeAsStringAsync(path, vcf);
       if (await Sharing.isAvailableAsync()) {
@@ -184,6 +261,36 @@ export default function ContactForm({
       }
     } catch (e) {
       Alert.alert('Export failed', e.message);
+    }
+  }
+
+  // Pick a frequency option from the FREQ list. Stamps freqStartedAt the
+  // first time so the contact appears in Next Up even without prior log
+  // history. Defaults weekly to today's day of week.
+  function pickFreq(v) {
+    setForm((f) => {
+      const next = { ...f, freq: v };
+      if (v && v !== 'never') {
+        if (!f.freqStartedAt) next.freqStartedAt = isoToday();
+        if (v === '1week' && f.freqDayOfWeek == null) {
+          next.freqDayOfWeek = new Date().getDay();
+        }
+      } else {
+        next.freqStartedAt = '';
+        next.freqDayOfWeek = null;
+      }
+      return next;
+    });
+  }
+
+  // Toggle the custom one-off follow-up date picker. When closing, clears
+  // the saved date so we don't keep a hidden value around.
+  function toggleCustomDate() {
+    if (customDateOpen) {
+      setForm((f) => ({ ...f, customFollowUpDate: '' }));
+      setCustomDateOpen(false);
+    } else {
+      setCustomDateOpen(true);
     }
   }
 
@@ -232,15 +339,28 @@ export default function ContactForm({
           </View>
         )}
 
-        {/* Basic Info */}
+        {/* Basic Info — split name, company, role, then initial intro and follow-up live here too */}
         <Section label="Basic Info">
-          <Field label="Full Name">
-            <StyledInput
-              value={form.name}
-              onChangeText={(v) => setForm((f) => ({ ...f, name: v }))}
-              placeholder="First Last"
-            />
-          </Field>
+          <View style={{ flexDirection: 'row', gap: 8 }}>
+            <View style={{ flex: 1 }}>
+              <Field label="First Name">
+                <StyledInput
+                  value={form.firstName || ''}
+                  onChangeText={(v) => setForm((f) => ({ ...f, firstName: v }))}
+                  placeholder="First"
+                />
+              </Field>
+            </View>
+            <View style={{ flex: 1 }}>
+              <Field label="Last Name">
+                <StyledInput
+                  value={form.lastName || ''}
+                  onChangeText={(v) => setForm((f) => ({ ...f, lastName: v }))}
+                  placeholder="Last"
+                />
+              </Field>
+            </View>
+          </View>
           <Field label="Company">
             <CompanyInput
               value={form.company}
@@ -255,6 +375,150 @@ export default function ContactForm({
               placeholder="e.g. VP of Acquisitions"
             />
           </Field>
+
+          {!isMyCard && (
+            <>
+              <Field label="Initial Introduction">
+                <StyledInput
+                  value={form.initialIntroduction || ''}
+                  onChangeText={(v) => setForm((f) => ({ ...f, initialIntroduction: v }))}
+                  placeholder="e.g. ULI conference, referral from..."
+                />
+              </Field>
+
+              <Field label="Follow up">
+                <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6 }}>
+                  {FREQ.map((o) => {
+                    const on = form.freq === o.v;
+                    return (
+                      <TouchableOpacity
+                        key={o.v}
+                        onPress={() => pickFreq(o.v)}
+                        style={{
+                          paddingHorizontal: 12,
+                          paddingVertical: 8,
+                          borderRadius: 10,
+                          borderWidth: 1,
+                          backgroundColor: on ? theme.bgAc : theme.bg2,
+                          borderColor: on ? theme.ac : theme.brd2,
+                        }}
+                      >
+                        <Text
+                          style={{
+                            fontSize: 11,
+                            color: on ? theme.ac : theme.t5,
+                            fontWeight: '600',
+                          }}
+                        >
+                          {o.l}
+                        </Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                  {/* Custom one-off date — sits alongside the frequency presets */}
+                  <TouchableOpacity
+                    onPress={toggleCustomDate}
+                    style={{
+                      paddingHorizontal: 12,
+                      paddingVertical: 8,
+                      borderRadius: 10,
+                      borderWidth: 1,
+                      backgroundColor: customDateOpen ? theme.bgAc : theme.bg2,
+                      borderColor: customDateOpen ? theme.ac : theme.brd2,
+                    }}
+                  >
+                    <Text
+                      style={{
+                        fontSize: 11,
+                        color: customDateOpen ? theme.ac : theme.t5,
+                        fontWeight: '600',
+                      }}
+                    >
+                      Custom
+                    </Text>
+                  </TouchableOpacity>
+                </View>
+
+                {/* Custom date picker, shown when Custom is tapped */}
+                {customDateOpen && (
+                  <View style={{ marginTop: 10 }}>
+                    <Text style={{ fontSize: 11, color: theme.t5, marginBottom: 6 }}>
+                      One-off follow-up date
+                    </Text>
+                    <DateInput
+                      value={parseLegacyDate(form.customFollowUpDate)}
+                      onChange={(v) => {
+                        // Re-serialize the date object back to the stored string format.
+                        if (!v || dateObjectIsEmpty(v)) {
+                          setForm((f) => ({ ...f, customFollowUpDate: '' }));
+                          return;
+                        }
+                        const mm = v.month != null ? String(v.month).padStart(2, '0') : '';
+                        const dd = v.day != null ? String(v.day).padStart(2, '0') : '';
+                        const yyyy = v.year != null ? String(v.year) : '';
+                        if (mm && dd && yyyy) {
+                          setForm((f) => ({ ...f, customFollowUpDate: `${yyyy}-${mm}-${dd}` }));
+                        } else if (mm && dd) {
+                          setForm((f) => ({ ...f, customFollowUpDate: `${mm}-${dd}` }));
+                        } else {
+                          setForm((f) => ({ ...f, customFollowUpDate: '' }));
+                        }
+                      }}
+                      requireYear
+                    />
+                  </View>
+                )}
+
+                {/* Day-of-week picker, shown only for weekly cadence */}
+                {form.freq === '1week' && (
+                  <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 10 }}>
+                    {DAYS_OF_WEEK.map((d) => {
+                      const on = form.freqDayOfWeek === d.v;
+                      return (
+                        <TouchableOpacity
+                          key={d.v}
+                          onPress={() => setForm((f) => ({ ...f, freqDayOfWeek: d.v }))}
+                          style={{
+                            paddingHorizontal: 10,
+                            paddingVertical: 6,
+                            borderRadius: 8,
+                            borderWidth: 1,
+                            backgroundColor: on ? theme.bgAc : theme.bg3,
+                            borderColor: on ? theme.ac : theme.brd,
+                          }}
+                        >
+                          <Text
+                            style={{
+                              fontSize: 10,
+                              color: on ? theme.ac : theme.t5,
+                              fontWeight: '600',
+                            }}
+                          >
+                            {d.s}
+                          </Text>
+                        </TouchableOpacity>
+                      );
+                    })}
+                  </View>
+                )}
+              </Field>
+
+              {nd && (
+                <Text
+                  style={{
+                    fontSize: 12,
+                    color: ndDiff < 0 ? theme.red : ndDiff <= 7 ? theme.warn : theme.ac,
+                    marginTop: -8,
+                    marginBottom: 12,
+                  }}
+                >
+                  Next contact: {fmtDate(nd)} (
+                  {ndDiff < 0 ? Math.abs(ndDiff) + 'd overdue' : ndDiff + 'd from now'})
+                </Text>
+              )}
+            </>
+          )}
+
           {!isMyCard && (
             <View
               style={{
@@ -289,7 +553,22 @@ export default function ContactForm({
           )}
         </Section>
 
-        {/* Contact Info */}
+        {/* Notes — manual-only, sits high in the form */}
+        {!isMyCard && (
+          <Section label="Notes">
+            <Field>
+              <StyledInput
+                value={form.notes || ''}
+                onChangeText={(v) => setForm((f) => ({ ...f, notes: v }))}
+                placeholder="Context, follow-ups, anything else..."
+                multiline
+                style={{ minHeight: 80 }}
+              />
+            </Field>
+          </Section>
+        )}
+
+        {/* Contact Info — phones and emails. LinkedIn removed. */}
         <Section label="Contact Info">
           <Field label="Phones">
             {phones.map((p, i) => (
@@ -340,223 +619,9 @@ export default function ContactForm({
               onPress={() => updateEmails([...emails, emptyEmail()])}
             />
           </Field>
-
-          <Field label="LinkedIn">
-            <StyledInput
-              value={form.linkedin || ''}
-              onChangeText={(v) => setForm((f) => ({ ...f, linkedin: v }))}
-              placeholder="linkedin.com/in/username"
-              autoCapitalize="none"
-            />
-          </Field>
         </Section>
 
-        {/* Addresses */}
-        <Section label="Addresses">
-          {addresses.map((a, i) => (
-            <AddressRow
-              key={`addr-${i}`}
-              theme={theme}
-              address={a}
-              index={i}
-              count={addresses.length}
-              onChange={(next) => {
-                const arr = [...addresses];
-                arr[i] = next;
-                updateAddresses(arr);
-              }}
-              onRemove={() => updateAddresses(addresses.filter((_, j) => j !== i))}
-              onMoveUp={() => updateAddresses(moveItem(addresses, i, i - 1))}
-              onMoveDown={() => updateAddresses(moveItem(addresses, i, i + 1))}
-            />
-          ))}
-          <AddRowButton
-            theme={theme}
-            label={addresses.length === 0 ? '+ Add address' : '+ Add another address'}
-            onPress={() => updateAddresses([...addresses, emptyAddress()])}
-          />
-
-          {addresses.length > 0 && (
-            <Field label="Recipient Name (for mailing labels)">
-              <StyledInput
-                value={form.recipientName || ''}
-                onChangeText={(v) => setForm((f) => ({ ...f, recipientName: v }))}
-                placeholder={form.name ? `Defaults to "${form.name}"` : 'e.g. The Smith Family'}
-              />
-            </Field>
-          )}
-        </Section>
-
-        {/* Mailing Lists */}
-        {!isMyCard && availableLists.length > 0 && (
-          <Section label="Mailing Lists">
-            <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6 }}>
-              {availableLists.map((list) => {
-                const on = formMailingLists.includes(list.id);
-                return (
-                  <TouchableOpacity
-                    key={list.id}
-                    onPress={() => toggleMailingList(list.id)}
-                    activeOpacity={0.7}
-                    style={{
-                      paddingHorizontal: 12,
-                      paddingVertical: 8,
-                      borderRadius: 20,
-                      borderWidth: 1,
-                      backgroundColor: on ? theme.bgAc : theme.bg2,
-                      borderColor: on ? theme.ac : theme.brd2,
-                    }}
-                  >
-                    <Text
-                      style={{
-                        fontSize: 12,
-                        color: on ? theme.ac : theme.t4,
-                        fontWeight: '600',
-                      }}
-                    >
-                      {list.name}
-                    </Text>
-                  </TouchableOpacity>
-                );
-              })}
-            </View>
-            {addresses.length === 0 && formMailingLists.length > 0 && (
-              <Text style={{ fontSize: 11, color: theme.warn, marginTop: 10, fontStyle: 'italic' }}>
-                Add an address above so this contact can be exported on the mailing label.
-              </Text>
-            )}
-          </Section>
-        )}
-
-        {/* Context (skipped on My Card) */}
-        {!isMyCard && (
-          <Section label="Context">
-            <Field label="How You Met">
-              <StyledInput
-                value={form.howMet}
-                onChangeText={(v) => setForm((f) => ({ ...f, howMet: v }))}
-                placeholder="e.g. ULI conference, referral from..."
-              />
-            </Field>
-            <Field label="How I Can Help">
-              <StyledInput
-                value={form.howHelp || ''}
-                onChangeText={(v) => setForm((f) => ({ ...f, howHelp: v }))}
-                placeholder="What value can you provide to this person?"
-                multiline
-              />
-            </Field>
-            <Field label="Last Contacted">
-              <StyledInput
-                value={form.lastContacted}
-                onChangeText={(v) => setForm((f) => ({ ...f, lastContacted: v }))}
-                placeholder="YYYY-MM-DD"
-              />
-            </Field>
-            <Field label="Follow-up Frequency">
-              <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6 }}>
-                {FREQ.map((o) => {
-                  const on = form.freq === o.v;
-                  return (
-                    <TouchableOpacity
-                      key={o.v}
-                      onPress={() =>
-                        setForm((f) => {
-                          const next = { ...f, freq: o.v };
-                          // When picking a real frequency for the first time,
-                          // stamp freqStartedAt so the contact appears in
-                          // Next Up even without prior log history. Also
-                          // default freqDayOfWeek to today so weekly users
-                          // get a sensible cadence anchor.
-                          if (o.v && o.v !== 'never') {
-                            if (!f.freqStartedAt) {
-                              next.freqStartedAt = isoToday();
-                            }
-                            if (o.v === '1week' && f.freqDayOfWeek == null) {
-                              next.freqDayOfWeek = new Date().getDay();
-                            }
-                          } else {
-                            // 'never' clears the schedule fields.
-                            next.freqStartedAt = '';
-                            next.freqDayOfWeek = null;
-                          }
-                          return next;
-                        })
-                      }
-                      style={{
-                        paddingHorizontal: 12,
-                        paddingVertical: 8,
-                        borderRadius: 10,
-                        borderWidth: 1,
-                        backgroundColor: on ? theme.bgAc : theme.bg2,
-                        borderColor: on ? theme.ac : theme.brd2,
-                      }}
-                    >
-                      <Text
-                        style={{
-                          fontSize: 11,
-                          color: on ? theme.ac : theme.t5,
-                          fontWeight: '600',
-                        }}
-                      >
-                        {o.l}
-                      </Text>
-                    </TouchableOpacity>
-                  );
-                })}
-              </View>
-
-              {/* Day-of-week picker, shown only for weekly cadence. Defaults
-                  to the day frequency was set on. */}
-              {form.freq === '1week' && (
-                <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 8 }}>
-                  {DAYS_OF_WEEK.map((d) => {
-                    const on = form.freqDayOfWeek === d.v;
-                    return (
-                      <TouchableOpacity
-                        key={d.v}
-                        onPress={() => setForm((f) => ({ ...f, freqDayOfWeek: d.v }))}
-                        style={{
-                          paddingHorizontal: 10,
-                          paddingVertical: 6,
-                          borderRadius: 8,
-                          borderWidth: 1,
-                          backgroundColor: on ? theme.bgAc : theme.bg3,
-                          borderColor: on ? theme.ac : theme.brd,
-                        }}
-                      >
-                        <Text
-                          style={{
-                            fontSize: 10,
-                            color: on ? theme.ac : theme.t5,
-                            fontWeight: '600',
-                          }}
-                        >
-                          {d.s}
-                        </Text>
-                      </TouchableOpacity>
-                    );
-                  })}
-                </View>
-              )}
-            </Field>
-            {nd && (
-              <Text
-                style={{
-                  fontSize: 12,
-                  color: ndDiff < 0 ? theme.red : ndDiff <= 7 ? theme.warn : theme.ac,
-                  marginTop: -8,
-                  marginBottom: 12,
-                }}
-              >
-                Next contact: {fmtDate(nd)} (
-                {ndDiff < 0 ? Math.abs(ndDiff) + 'd overdue' : ndDiff + 'd from now'})
-              </Text>
-            )}
-          </Section>
-        )}
-
-        {/* Tags (skipped on My Card) */}
+        {/* Tags — directly under Contact Info per design */}
         {!isMyCard && (
           <Section label="Tags">
             <TagSelector
@@ -575,29 +640,45 @@ export default function ContactForm({
           </Section>
         )}
 
-        {/* Conversation (skipped on My Card) */}
-        {!isMyCard && (
-          <Section label="Conversation">
-            <Field label="Key Topics Discussed">
-              <StyledInput
-                value={form.topics}
-                onChangeText={(v) => setForm((f) => ({ ...f, topics: v }))}
-                placeholder="What did you talk about?"
-                multiline
-                style={{ minHeight: 80 }}
+        {/* Addresses — hidden behind a button when empty, expanded when there are addresses */}
+        <Section label="Addresses">
+          {addresses.length === 0 && !addressesExpanded ? (
+            <AddRowButton
+              theme={theme}
+              label="+ Add an address"
+              onPress={addFirstAddress}
+            />
+          ) : (
+            <>
+              {addresses.map((a, i) => (
+                <AddressRow
+                  key={`addr-${i}`}
+                  theme={theme}
+                  address={a}
+                  index={i}
+                  count={addresses.length}
+                  onChange={(next) => {
+                    const arr = [...addresses];
+                    arr[i] = next;
+                    updateAddresses(arr);
+                  }}
+                  onRemove={() => {
+                    const next = addresses.filter((_, j) => j !== i);
+                    updateAddresses(next);
+                    if (next.length === 0) setAddressesExpanded(false);
+                  }}
+                  onMoveUp={() => updateAddresses(moveItem(addresses, i, i - 1))}
+                  onMoveDown={() => updateAddresses(moveItem(addresses, i, i + 1))}
+                />
+              ))}
+              <AddRowButton
+                theme={theme}
+                label="+ Add another address"
+                onPress={() => updateAddresses([...addresses, emptyAddress()])}
               />
-            </Field>
-            <Field label="Notes">
-              <StyledInput
-                value={form.notes}
-                onChangeText={(v) => setForm((f) => ({ ...f, notes: v }))}
-                placeholder="Context, follow-ups, anything else..."
-                multiline
-                style={{ minHeight: 80 }}
-              />
-            </Field>
-          </Section>
-        )}
+            </>
+          )}
+        </Section>
 
         {/* Background & Experience */}
         <Section label="Background & Experience">
@@ -833,8 +914,65 @@ export default function ContactForm({
           </Field>
         </Section>
 
+        {/* Mailing Lists — bottom section, includes recipient name */}
+        {!isMyCard && (
+          <Section label="Mailing Lists">
+            {availableLists.length > 0 ? (
+              <>
+                <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6 }}>
+                  {availableLists.map((list) => {
+                    const on = formMailingLists.includes(list.id);
+                    return (
+                      <TouchableOpacity
+                        key={list.id}
+                        onPress={() => toggleMailingList(list.id)}
+                        activeOpacity={0.7}
+                        style={{
+                          paddingHorizontal: 12,
+                          paddingVertical: 8,
+                          borderRadius: 20,
+                          borderWidth: 1,
+                          backgroundColor: on ? theme.bgAc : theme.bg2,
+                          borderColor: on ? theme.ac : theme.brd2,
+                        }}
+                      >
+                        <Text
+                          style={{
+                            fontSize: 12,
+                            color: on ? theme.ac : theme.t4,
+                            fontWeight: '600',
+                          }}
+                        >
+                          {list.name}
+                        </Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+                {addresses.length === 0 && formMailingLists.length > 0 && (
+                  <Text style={{ fontSize: 11, color: theme.warn, marginTop: 10, fontStyle: 'italic' }}>
+                    Add an address above so this contact can be exported on the mailing label.
+                  </Text>
+                )}
+              </>
+            ) : (
+              <Text style={{ fontSize: 12, color: theme.t6 }}>
+                Create a mailing list in Settings to add contacts to it.
+              </Text>
+            )}
+
+            <Field label="Recipient Name (for mailing labels)">
+              <StyledInput
+                value={form.recipientName || ''}
+                onChangeText={(v) => setForm((f) => ({ ...f, recipientName: v }))}
+                placeholder={displayName ? `Defaults to "${displayName}"` : 'e.g. The Smith Family'}
+              />
+            </Field>
+          </Section>
+        )}
+
         {/* Export */}
-        {form.name?.trim() && (
+        {displayName ? (
           <TouchableOpacity
             onPress={exportVcf}
             style={{
@@ -855,7 +993,7 @@ export default function ContactForm({
               Export to Contacts (.vcf)
             </Text>
           </TouchableOpacity>
-        )}
+        ) : null}
 
         {dupeWarn && (
           <View
@@ -872,7 +1010,7 @@ export default function ContactForm({
               Possible duplicate found
             </Text>
             <Text style={{ color: theme.t3, fontSize: 12, marginBottom: 10 }}>
-              "{dupeWarn.name}"{dupeWarn.email ? ' (' + dupeWarn.email + ')' : ''} already exists.
+              "{getDisplayName(dupeWarn)}"{dupeWarn.email ? ' (' + dupeWarn.email + ')' : ''} already exists.
             </Text>
             <View style={{ flexDirection: 'row', gap: 8 }}>
               <TouchableOpacity
@@ -936,18 +1074,8 @@ export default function ContactForm({
 }
 
 // =================== KidRow component ===================
-//
-// Each kid has gender, name, notes, plus an age input that toggles between
-// two modes: "age" (a single number, with auto-increment over time via
-// ageAsOf storage) and "birthday" (a three-box DateInput).
-//
-// When in "age" mode and the user types a number, we save:
-//   { age: '<typed string for display>', ageAsOf: { age: <number>, asOf: today } }
-// When in "birthday" mode, we save the date object.
 
 function KidRow({ kid, theme, onChange, onRemove }) {
-  // Migrate legacy kid shape on render. If `kid.ageMode` is missing,
-  // infer from existing data: birthday wins if present, else 'age'.
   const k = kid || {};
   const hasBirthday =
     k.birthday && (typeof k.birthday === 'object' ? !dateObjectIsEmpty(k.birthday) : !!k.birthday);
@@ -958,8 +1086,6 @@ function KidRow({ kid, theme, onChange, onRemove }) {
   }
 
   function setAgeStr(v) {
-    // Persist the raw string for display, plus an ageAsOf record for the
-    // auto-increment math. Strip non-numeric (allow . for half-years).
     const cleaned = (v || '').replace(/[^0-9.]/g, '');
     const num = parseFloat(cleaned);
     const asOfRecord =
@@ -985,7 +1111,6 @@ function KidRow({ kid, theme, onChange, onRemove }) {
         backgroundColor: theme.bg2,
       }}
     >
-      {/* Top row: gender, name, remove */}
       <View style={{ flexDirection: 'row', gap: 8, alignItems: 'center' }}>
         <TouchableOpacity
           onPress={() => onChange({ ...k, gender: k.gender === 'girl' ? 'boy' : 'girl' })}
@@ -1019,7 +1144,6 @@ function KidRow({ kid, theme, onChange, onRemove }) {
         </TouchableOpacity>
       </View>
 
-      {/* Age / Birthday toggle */}
       <View style={{ flexDirection: 'row', gap: 6, marginTop: 10, marginBottom: 8 }}>
         <ModeBtn
           theme={theme}
@@ -1035,7 +1159,6 @@ function KidRow({ kid, theme, onChange, onRemove }) {
         />
       </View>
 
-      {/* Mode-specific input */}
       {ageMode === 'age' ? (
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
           <StyledInput
@@ -1053,7 +1176,6 @@ function KidRow({ kid, theme, onChange, onRemove }) {
         <DateInput value={k.birthday} onChange={setBirthday} compact />
       )}
 
-      {/* Notes */}
       <StyledInput
         placeholder="Notes about this child (optional)..."
         value={k.notes || ''}
@@ -1091,7 +1213,7 @@ function ModeBtn({ theme, on, label, onPress }) {
   );
 }
 
-// =================== Existing sub-components ===================
+// =================== Sub-components ===================
 
 function LabelPicker({ theme, value, presets, onChange }) {
   const isPresetMatch = presets.includes(value);

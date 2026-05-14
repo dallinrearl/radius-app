@@ -92,9 +92,6 @@ export const EMAIL_LABELS  = ['Personal', 'Work', 'Other'];
 export const ADDRESS_LABELS = ['Home', 'Work', 'Vacation', 'Mailing', 'Other'];
 
 // ---------- Empty entry factories ----------
-//
-// Use these instead of inlining shapes so all the new contact fields are
-// created the same way everywhere.
 
 export const emptyPhone = () => ({ label: 'Cell', value: '' });
 export const emptyEmail = () => ({ label: 'Personal', value: '' });
@@ -110,20 +107,29 @@ export const emptyAddress = () => ({
 
 // ---------- EMPTY_CONTACT ----------
 //
-// Adds new multi-entry fields (phones, emails, addresses) and mailing-list
-// support. Keeps the legacy `phone` and `email` string fields for backward
-// compatibility while migration is in progress; new code should read from
-// the array fields. See `migrateLegacyContact` below.
+// Schema notes:
+// - `firstName` and `lastName` replace the old single `name` field. The
+//   legacy `name` is preserved on read by `migrateLegacyContact` (split on
+//   first space) but no longer lives on EMPTY_CONTACT. Use
+//   `getDisplayName(c)` everywhere that needs to render a contact label.
+// - `initialIntroduction` replaces the old `howMet`. Same semantic field,
+//   clearer name. Migration auto-renames on read.
+// - Removed entirely: `topics`, `notes`-as-transcripts, `linkedin`, `howHelp`.
+//   `notes` stays as a manual-only free-text field. Transcript / meeting
+//   content lives exclusively in `convLog`.
+// - `customFollowUpDate` is a one-off override that sits alongside `freq`.
+//   When set, the UI treats it as the next scheduled follow-up regardless
+//   of frequency. Format: 'YYYY-MM-DD' or ''.
 //
-// Date fields (birthday, anniversary) are flexible strings:
+// Date fields (birthday, anniversary, customFollowUpDate) are flexible
+// strings. See `parseFlexibleDate` below.
 //   - 'YYYY-MM-DD' (full date)
-//   - 'MM-DD'      (no year, e.g. '06-15')
+//   - 'MM-DD'      (no year, e.g. '06-15')   [birthday/anniversary only]
 //   - ''           (not set)
-// See `parseFlexibleDate` below for parsing.
 
 export const EMPTY_CONTACT = {
   // Identity
-  name: '', company: '', role: '', linkedin: '',
+  firstName: '', lastName: '', company: '', role: '',
 
   // Legacy single fields (kept for backward compat; migration moves them
   // into `phones` / `emails` on read).
@@ -137,8 +143,13 @@ export const EMPTY_CONTACT = {
   addresses: [],  // [{ label, line1, line2, city, state, zip, country }]
 
   // Relationship context
-  howMet: '', howHelp: '', topics: '', notes: '', lastContacted: '',
-  tags: [], freq: 'never', priority: false,
+  initialIntroduction: '',
+  notes: '',                  // MANUAL ONLY. AI must never write here.
+  lastContacted: '',          // No longer manually editable. Derived from convLog.
+  tags: [],
+  freq: 'never',
+  customFollowUpDate: '',     // 'YYYY-MM-DD' or ''. One-off override for next follow-up.
+  priority: false,
 
   // Personal details
   birthday: '',     // flexible: 'YYYY-MM-DD' or 'MM-DD'
@@ -146,7 +157,7 @@ export const EMPTY_CONTACT = {
   hometown: '',
   married: null,    // null | 'married' | 'single' | etc.
   spouseName: '',
-  anniversary: '',  // flexible: 'YYYY-MM-DD' or 'MM-DD'. Preserved if married toggles off.
+  anniversary: '',  // flexible: 'YYYY-MM-DD' or 'MM-DD'
   kids: [],
   interests: [],
 
@@ -154,7 +165,7 @@ export const EMPTY_CONTACT = {
   experience: '', pastCompanies: [],
 
   // Mailing list / cards
-  recipientName: '',  // override for mailing labels; falls back to `name`
+  recipientName: '',  // override for mailing labels; falls back to display name
   mailingLists: [],   // array of mailing list ids the contact belongs to
 
   // System
@@ -165,11 +176,35 @@ export const EMPTY_CONTACT = {
   sampleAddedAt: null,
 };
 
-// ---------- Flexible date helpers ----------
+// ---------- Display name helper ----------
 //
-// Birthday and anniversary accept either 'YYYY-MM-DD' or 'MM-DD'. These
-// helpers let you check format, extract month/day, and produce a Date for
-// the next upcoming occurrence (useful for reminders, sorting).
+// Always use this to render a contact's name. Handles the legacy `name`
+// field on contacts that haven't been touched by the migration yet.
+
+export function getDisplayName(c) {
+  if (!c || typeof c !== 'object') return '';
+  const first = (c.firstName || '').trim();
+  const last = (c.lastName || '').trim();
+  if (first || last) return [first, last].filter(Boolean).join(' ');
+  if (typeof c.name === 'string') return c.name.trim();
+  return '';
+}
+
+// Split a legacy single-name string into first/last on the first space.
+// Single-word names become first name only.
+export function splitLegacyName(s) {
+  if (!s || typeof s !== 'string') return { firstName: '', lastName: '' };
+  const trimmed = s.trim();
+  if (!trimmed) return { firstName: '', lastName: '' };
+  const idx = trimmed.indexOf(' ');
+  if (idx < 0) return { firstName: trimmed, lastName: '' };
+  return {
+    firstName: trimmed.slice(0, idx),
+    lastName: trimmed.slice(idx + 1).trim(),
+  };
+}
+
+// ---------- Flexible date helpers ----------
 
 const FULL_DATE_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
 const MONTH_DAY_RE = /^(\d{2})-(\d{2})$/;
@@ -217,6 +252,39 @@ export function formatFlexibleDate(s) {
   return `${monthName} ${parts.day}`;
 }
 
+// Convert separate MM/DD/YYYY string inputs into the flexible date format.
+// Year is optional. Returns '' if month or day is missing/invalid.
+//   ('06', '15', '1990') -> '1990-06-15'
+//   ('06', '15', '')     -> '06-15'
+//   ('6', '5', '')       -> '06-05'
+export function partsToFlexibleDate(mm, dd, yyyy) {
+  const month = parseInt(mm, 10);
+  const day = parseInt(dd, 10);
+  if (!isValidMonthDay(month, day)) return '';
+  const mmStr = String(month).padStart(2, '0');
+  const ddStr = String(day).padStart(2, '0');
+  const yearStr = (yyyy || '').toString().trim();
+  if (yearStr && /^\d{4}$/.test(yearStr)) {
+    return `${yearStr}-${mmStr}-${ddStr}`;
+  }
+  return `${mmStr}-${ddStr}`;
+}
+
+// Reverse of partsToFlexibleDate. Splits a stored date back into the three
+// pieces the UI binds to. Empty strings for missing pieces.
+//   '1990-06-15' -> { mm: '06', dd: '15', yyyy: '1990' }
+//   '06-15'      -> { mm: '06', dd: '15', yyyy: '' }
+//   ''           -> { mm: '',   dd: '',   yyyy: '' }
+export function flexibleDateToParts(s) {
+  const parts = parseFlexibleDate(s);
+  if (!parts) return { mm: '', dd: '', yyyy: '' };
+  return {
+    mm: String(parts.month).padStart(2, '0'),
+    dd: String(parts.day).padStart(2, '0'),
+    yyyy: parts.hasYear ? String(parts.year) : '',
+  };
+}
+
 // ---------- Migration helper ----------
 //
 // Takes a contact in any historical shape and returns it in the current
@@ -227,6 +295,36 @@ export function migrateLegacyContact(c) {
 
   const out = { ...c };
 
+  // Name: split legacy `name` into firstName/lastName.
+  if (typeof out.firstName !== 'string') out.firstName = '';
+  if (typeof out.lastName !== 'string') out.lastName = '';
+  if (!out.firstName && !out.lastName && typeof out.name === 'string' && out.name.trim()) {
+    const split = splitLegacyName(out.name);
+    out.firstName = split.firstName;
+    out.lastName = split.lastName;
+  }
+  // Keep `name` in the object for now so older display code doesn't break
+  // mid-migration. Anything writing contacts should stop setting `name`.
+  // It can be dropped entirely once the Supabase column migration ships.
+
+  // initialIntroduction <- howMet
+  if (typeof out.initialIntroduction !== 'string') {
+    out.initialIntroduction = typeof out.howMet === 'string' ? out.howMet : '';
+  }
+  delete out.howMet;
+
+  // Remove fields we no longer support.
+  delete out.howHelp;
+  delete out.linkedin;
+  delete out.topics;
+
+  // Notes: ensure it's a string (manual-only field).
+  if (typeof out.notes !== 'string') out.notes = '';
+
+  // customFollowUpDate (new field).
+  if (typeof out.customFollowUpDate !== 'string') out.customFollowUpDate = '';
+
+  // Phones/emails/addresses arrays.
   if (!Array.isArray(out.phones)) out.phones = [];
   if (out.phones.length === 0 && typeof out.phone === 'string' && out.phone.trim()) {
     out.phones = [{ label: 'Cell', value: out.phone.trim() }];
@@ -291,13 +389,6 @@ export const TEMPLATE_TYPES = [
 ];
 
 // ---------- Sample contacts ----------
-//
-// Two universal sample contacts — one personal, one professional — that
-// work for any user regardless of industry or use type. Marked with
-// `isSample: true` and `sampleAddedAt` so they can be cleaned up later.
-//
-// Inserted only when the user opts in during onboarding (or via a manual
-// "Add samples" action in Settings later).
 
 export function getSampleContacts(addDays, isoToday) {
   const t = isoToday();
@@ -308,11 +399,11 @@ export function getSampleContacts(addDays, isoToday) {
     {
       ...EMPTY_CONTACT,
       id: 'sample_maya',
-      name: 'Maya Patel',
+      firstName: 'Maya',
+      lastName: 'Patel',
       company: '',
       role: '',
 
-      // Multi-entry contact info (legacy strings kept in sync).
       phone: '(512) 555-0142',
       email: 'maya.patel@example.com',
       phones: [{ label: 'Cell', value: '(512) 555-0142' }],
@@ -329,22 +420,21 @@ export function getSampleContacts(addDays, isoToday) {
       }],
       recipientName: 'The Patel Family',
 
-      howMet: 'College roommate. Stood up at her wedding.',
-      howHelp: '',
-      topics: "Pottery class, dad's retirement, planning a girls trip in spring",
+      initialIntroduction: 'College roommate. Stood up at her wedding.',
       notes: 'Allergic to shellfish. Loves audiobooks. Always brings the best wine.',
       lastContacted: addDays(t, -22),
       tags: ['close_friend', 'college_friend'],
       freq: '1month',
+      customFollowUpDate: '',
       priority: false,
 
-      birthday: '03-18',           // year-optional format
+      birthday: '03-18',
       timezone: 'MT',
       location: 'Salt Lake City, UT',
       hometown: 'Austin, TX',
       married: 'married',
       spouseName: 'Raj',
-      anniversary: '2018-09-22',   // full date format
+      anniversary: '2018-09-22',
       kids: [
         { name: 'Arjun', age: '4', gender: 'boy', notes: 'Obsessed with dinosaurs and trains.' },
       ],
@@ -371,7 +461,8 @@ export function getSampleContacts(addDays, isoToday) {
     {
       ...EMPTY_CONTACT,
       id: 'sample_marcus',
-      name: 'Marcus Johnson',
+      firstName: 'Marcus',
+      lastName: 'Johnson',
       company: 'Ridgeline Advisors',
       role: 'Senior Partner',
 
@@ -379,8 +470,6 @@ export function getSampleContacts(addDays, isoToday) {
       email: 'mjohnson@ridgelineadvisors.com',
       phones: [{ label: 'Work', value: '(303) 555-0287' }],
       emails: [{ label: 'Work', value: 'mjohnson@ridgelineadvisors.com' }],
-
-      linkedin: 'marcusjohnsonadvisor',
 
       addresses: [{
         label: 'Work',
@@ -393,21 +482,20 @@ export function getSampleContacts(addDays, isoToday) {
       }],
       recipientName: '',
 
-      howMet: 'Introduced by a former colleague at an industry event.',
-      howHelp: 'Decades of senior leadership perspective; great sounding board for big career moves.',
-      topics: 'Career transition, his new board seat, leadership succession at his firm',
+      initialIntroduction: 'Introduced by a former colleague at an industry event.',
       notes: 'Direct communicator. Prefers email over text. Reads everything you send him.',
       lastContacted: addDays(t, -42),
       tags: ['mentor', 'advisor'],
       freq: '3months',
-      priority: true,            // VIP
+      customFollowUpDate: '',
+      priority: true,
 
-      birthday: '1968-07-14',     // full date
+      birthday: '1968-07-14',
       timezone: 'MT',
       location: 'Denver, CO',
       hometown: 'Chicago, IL',
       married: 'married',
-      spouseName: '',             // intentionally blank
+      spouseName: '',
       anniversary: '',
       kids: [],
       interests: ['Cycling', 'Reading'],
