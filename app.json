@@ -3,6 +3,7 @@
     "name": "Radius",
     "slug": "radius-app",
     "version": "1.0.0",
+    "scheme": "radius",
     "orientation": "portrait",
     "userInterfaceStyle": "automatic",
     "assetBundlePatterns": ["**/*"],

@@ -2,7 +2,15 @@ import { onAuthChange, signOut } from './src/lib/auth';
 import AuthScreen from './src/screens/AuthScreen';
 import 'react-native-gesture-handler';
 import React, { useState, useEffect, useRef } from 'react';
-import { View, Text, ActivityIndicator, Alert, Linking } from 'react-native';
+import {
+  View,
+  Text,
+  ActivityIndicator,
+  Alert,
+  Linking,
+  Modal,
+  TouchableOpacity,
+} from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
@@ -14,6 +22,7 @@ import * as Sharing from 'expo-sharing';
 import { ThemeProvider, useTheme } from './src/styles/theme';
 import { useAppStore } from './src/hooks/useAppStore';
 import { runGranolaSync, shouldRunBackgroundSync } from './src/utils/granolaSync';
+import { aiExtractFromVoice } from './src/utils/ai';
 import NavBar from './src/components/NavBar';
 import { Toast } from './src/components/Common';
 import LogTouchpointModal from './src/components/LogTouchpointModal';
@@ -38,18 +47,14 @@ import ReviewQueueScreen from './src/screens/ReviewQueueScreen';
 import { addDays, isoToday } from './src/utils/helpers';
 import { EMPTY_CONTACT } from './src/constants';
 
-import {
-  InstrumentSerif_400Regular,
-} from '@expo-google-fonts/instrument-serif';
+import { InstrumentSerif_400Regular } from '@expo-google-fonts/instrument-serif';
 import {
   DMSans_400Regular,
   DMSans_500Medium,
   DMSans_600SemiBold,
   DMSans_700Bold,
 } from '@expo-google-fonts/dm-sans';
-import {
-  Newsreader_400Regular,
-} from '@expo-google-fonts/newsreader';
+import { Newsreader_400Regular } from '@expo-google-fonts/newsreader';
 import {
   Karla_400Regular,
   Karla_500Medium,
@@ -120,9 +125,6 @@ function AppInner() {
   const [selected, setSelected] = useState(null);
   const [editForm, setEditForm] = useState(null);
   const [editFlash, setEditFlash] = useState(false);
-  // When set, Cancel/Save on the contact form returns to this view instead
-  // of the default routing. Used so that creating a contact from the
-  // review queue returns the user to the review queue, not the contacts list.
   const [formReturnView, setFormReturnView] = useState(null);
   const [dupeWarn, setDupeWarn] = useState(null);
   const [forceSavePending, setForceSavePending] = useState(false);
@@ -132,6 +134,14 @@ function AppInner() {
   const [user, setUser] = useState(null);
   const [authChecked, setAuthChecked] = useState(false);
   const [selectedListId, setSelectedListId] = useState(null);
+  // Holds the queue item being processed by createContactFromAttendee.
+  // After the user saves the contact, we use this to attach the transcript
+  // as a log entry AND remove the queue item / speaker.
+  const [pendingAttendeeItem, setPendingAttendeeItem] = useState(null);
+  const [extractingForAttendee, setExtractingForAttendee] = useState(false);
+  // "Have AI fill in details?" modal state. Shown to Pro users right before
+  // we open the contact form for a Granola-sourced creation.
+  const [aiFillPrompt, setAiFillPrompt] = useState(null); // null | { item }
 
   useEffect(() => {
     if (store.loaded && store.pin) {
@@ -147,9 +157,6 @@ function AppInner() {
     return () => subscription?.unsubscribe();
   }, []);
 
-  // Silent background sync once per app session, throttled to once per
-  // 30 minutes via the lastSync timestamp. Fires when the user is loaded
-  // in, signed in, unlocked, and has connected Granola.
   const autoSyncRanRef = useRef(false);
   useEffect(() => {
     if (autoSyncRanRef.current) return;
@@ -172,31 +179,36 @@ function AppInner() {
           apiKey,
           contacts: store.contacts,
           myCard: store.myCard,
-          onProgress: () => {}, // silent
+          onProgress: () => {},
           onCommit: store.commit,
           addToReviewQueue: store.addToReviewQueue,
           granolaAiUnlocked: store.featureUnlocked('granolaAiProcessing'),
         });
 
-        // Only show toast if anything actually happened
         if (result.hadAnything) {
           showToast('Granola: ' + result.summary, theme.ac);
         }
       } catch (e) {
         console.warn('Background Granola sync skipped:', e?.message);
-        // Silent failure — do not bother the user
       }
     })();
-  }, [store.loaded, user, locked, store.onboarded, store.contacts, store.myCard, store.commit, store.addToReviewQueue, theme.ac]);
+  }, [
+    store.loaded,
+    user,
+    locked,
+    store.onboarded,
+    store.contacts,
+    store.myCard,
+    store.commit,
+    store.addToReviewQueue,
+    theme.ac,
+  ]);
 
   function showToast(msg, color) {
     setToast({ msg, color });
     setTimeout(() => setToast(null), 2200);
   }
 
-  // Sign the user out of Supabase. The onAuthChange listener will pick up
-  // the change and flip user back to null, which routes us to AuthScreen.
-  // No need to manually clear state — the auth gate handles it.
   async function handleSignOut() {
     try {
       if (typeof signOut === 'function') {
@@ -216,10 +228,6 @@ function AppInner() {
     }
   }
 
-  // Handles the "Start trial" button on the paywall modal. Asks the Stripe
-  // Edge Function to create a checkout session, then opens the URL in the
-  // browser. Stripe redirects back via a `radius://` deep link after pay or
-  // cancel, which is handled by the Linking listener below.
   async function handleStartTrial(plan = 'monthly') {
     try {
       const { url } = await createCheckoutSession({ plan, trial: true });
@@ -228,10 +236,7 @@ function AppInner() {
       if (supported) {
         await Linking.openURL(url);
       } else {
-        Alert.alert(
-          'Could not open checkout',
-          'Please try again or contact support.',
-        );
+        Alert.alert('Could not open checkout', 'Please try again or contact support.');
       }
     } catch (e) {
       console.error('handleStartTrial failed:', e?.message);
@@ -239,8 +244,6 @@ function AppInner() {
     }
   }
 
-  // Open Stripe Customer Portal so trial users can manage their subscription
-  // before the trial ends. Triggered by the trial banner's Manage button.
   async function openBillingPortal() {
     try {
       const { url } = await createPortalSession();
@@ -256,15 +259,11 @@ function AppInner() {
     }
   }
 
-  // Listen for deep link returns from Stripe checkout. The Edge Function  // sets success_url and cancel_url to radius:// URLs that we intercept here.
-  // On success, refresh the profile so the new tier is reflected.
   useEffect(() => {
     const handleUrl = ({ url }) => {
       if (!url) return;
       if (url.startsWith('radius://checkout-success')) {
         showToast('Welcome to Pro!', theme.ac);
-        // Refresh tier from server. Webhook may take a moment to fire so
-        // give it a beat. Two retries in case the first is too quick.
         setTimeout(() => store.refetchProfile(), 1500);
         setTimeout(() => store.refetchProfile(), 4500);
       } else if (url.startsWith('radius://checkout-cancel')) {
@@ -272,7 +271,6 @@ function AppInner() {
       }
     };
     const sub = Linking.addEventListener('url', handleUrl);
-    // Also check if app was opened with a URL from cold start.
     Linking.getInitialURL().then((url) => {
       if (url) handleUrl({ url });
     });
@@ -284,12 +282,6 @@ function AppInner() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [theme.ac]);
 
-  // Trial urgency toasts: fire once per threshold per device. Stored in
-  // AsyncStorage so they don't repeat on every app open. Two thresholds:
-  //   - 3 days remaining (warning level): "3 days left in trial. Manage..."
-  //   - 1 day or less remaining (urgent): "Trial ends today. Manage..."
-  // Each fires the FIRST time we observe the user crossing into that
-  // threshold. After that, the banner alone reminds them.
   useEffect(() => {
     if (!store.trialActive) return;
     if (store.trialDaysLeft == null) return;
@@ -309,9 +301,7 @@ function AppInner() {
             await AsyncStorage.setItem('crm-trial-toast-3d', 'true');
           }
         }
-      } catch (_) {
-        // Toast is a nice-to-have; never block on storage errors.
-      }
+      } catch (_) {}
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [store.trialActive, store.trialDaysLeft]);
@@ -342,14 +332,82 @@ function AppInner() {
     return true;
   }
 
+  // After save: attach the meeting transcript as a convLog entry to the
+  // new contact, and clean up the queue item (or one speaker within it).
+  async function finalizeAttendeeContactIfNeeded(savedContact) {
+    if (!pendingAttendeeItem) return;
+    const item = pendingAttendeeItem;
+    setPendingAttendeeItem(null);
+
+    try {
+      const date = item.meetingDate || isoToday();
+      const text =
+        (item.rawText || '').trim() ||
+        (item.rawTranscript || '').trim() ||
+        ('Meeting: ' + (item.meetingTitle || 'Untitled') + ' on ' + date);
+      const entry = {
+        id: 'granola_' + item.noteId + '_' + savedContact.id,
+        date,
+        text,
+        type: 'meeting',
+        source: 'granola',
+        source_id: item.noteId,
+      };
+      if (item.rawTranscript && item.rawTranscript.trim()) {
+        entry.rawTranscript = item.rawTranscript;
+      }
+      const updated = store.contacts.map((c) => {
+        if (c.id !== savedContact.id) return c;
+        const log = Array.isArray(c.convLog) ? c.convLog : [];
+        if (log.some((e) => e.id === entry.id)) return c;
+        return {
+          ...c,
+          convLog: [entry, ...log],
+          lastContacted: date > (c.lastContacted || '') ? date : c.lastContacted,
+        };
+      });
+      store.commit(updated);
+
+      // Clean up the queue item.
+      //
+      // If this came from an AI-found speaker (the item has _aiSpeakerSource),
+      // remove just THAT speaker from the parent item's aiAttendees array.
+      // If it was the last speaker, remove the whole parent item.
+      // Otherwise (regular Granola item), just remove the whole item.
+      if (item._aiSpeakerSource) {
+        const { parentItemId, speakerIndex } = item._aiSpeakerSource;
+        const parent = (store.reviewQueue || []).find((q) => q.id === parentItemId);
+        if (parent) {
+          const currentAi = Array.isArray(parent.aiAttendees)
+            ? parent.aiAttendees
+            : [];
+          const nextAi = currentAi.filter((_, i) => i !== speakerIndex);
+          if (nextAi.length === 0) {
+            await store.removeFromReviewQueue(parentItemId);
+          } else {
+            await store.patchReviewQueueItem(parentItemId, {
+              aiAttendees: nextAi,
+            });
+          }
+        }
+      } else {
+        await store.removeFromReviewQueue(item.id);
+      }
+    } catch (e) {
+      console.warn('finalizeAttendeeContactIfNeeded failed:', e?.message);
+    }
+  }
+
   function saveCurrentForm() {
     const ok = commitContact(editForm, forceSavePending);
     if (ok) {
       const returnTo = formReturnView;
+      const savedSnapshot = { ...editForm };
       setEditForm(null);
       setEditFlash(false);
       setForceSavePending(false);
       setFormReturnView(null);
+      finalizeAttendeeContactIfNeeded(savedSnapshot);
       if (returnTo) {
         setView(returnTo);
       } else {
@@ -365,10 +423,12 @@ function AppInner() {
     const ok = commitContact(editForm, true);
     if (ok) {
       const returnTo = formReturnView;
+      const savedSnapshot = { ...editForm };
       setEditForm(null);
       setEditFlash(false);
       setForceSavePending(false);
       setFormReturnView(null);
+      finalizeAttendeeContactIfNeeded(savedSnapshot);
       if (returnTo) {
         setView(returnTo);
       } else {
@@ -403,9 +463,6 @@ function AppInner() {
     if (selected?.id === updated.id) setSelected(updated);
   }
 
-  // Wrapper around store.toggleContactOnList that also keeps the
-  // currently-selected contact in sync (so the detail screen reflects
-  // the change immediately).
   function toggleContactOnListLocal(contact, listId) {
     const updated = store.toggleContactOnList(contact, listId);
     if (selected?.id === contact.id) setSelected(updated);
@@ -444,17 +501,36 @@ function AppInner() {
     showToast('Logged with ' + c.name);
   }
 
-  // Open the review queue screen.
   function openReviewQueue() {
     setView('review_queue');
   }
 
-  // From a queue item, jump into the contact form pre-filled with the
-  // attendee's name + email so the user can finish creating them. The
-  // queue item is left in place; user can come back and confirm against
-  // the new contact (which now has the email, so a future sync will match
-  // automatically anyway).
+  // Entry point from ReviewQueueScreen's "Create new" or "Add as new" buttons.
+  //
+  // Behavior:
+  //   - Pro user with a transcript: pop the "Have AI fill in details?" modal.
+  //     Yes → run aiExtractFromVoice → form opens fully pre-filled.
+  //     No  → blank form with just name/email from the attendee.
+  //   - Free user OR no transcript: skip the modal, open name-only form.
+  //
+  // On save (handled by saveCurrentForm), the transcript is attached as a
+  // convLog entry on the new contact and the queue item is cleaned up.
   function createContactFromAttendee(item) {
+    const aiUnlocked = store.featureUnlocked('granolaAiProcessing');
+    const transcript = item?.rawText || item?.rawTranscript || '';
+    const hasTranscript = !!transcript.trim();
+
+    if (aiUnlocked && hasTranscript) {
+      // Show the prompt; user decides AI vs manual.
+      setAiFillPrompt({ item });
+    } else {
+      // Free user or no transcript — go straight to a blank prefilled form.
+      openBlankFormFromAttendee(item);
+    }
+  }
+
+  // Manual path: open the form with just the attendee's name/email.
+  function openBlankFormFromAttendee(item) {
     const att = item?.attendee || {};
     const prefill = {
       ...EMPTY_CONTACT,
@@ -464,10 +540,57 @@ function AppInner() {
     if (att.email) {
       prefill.emails = [{ label: 'Personal', value: att.email }];
     }
+    setPendingAttendeeItem(item);
     setEditForm(prefill);
     setEditFlash(true);
     setFormReturnView('review_queue');
     setView('edit');
+  }
+
+  // AI path: run aiExtractFromVoice with myCard so the AI knows who the
+  // user is, then open the form pre-filled with everything found.
+  async function openAiFilledFormFromAttendee(item) {
+    const att = item?.attendee || {};
+    const transcript = item?.rawText || item?.rawTranscript || '';
+
+    setPendingAttendeeItem(item);
+    setExtractingForAttendee(true);
+    showToast('Reading the transcript...', theme.purp);
+
+    try {
+      const extracted = await aiExtractFromVoice(transcript, {
+        myCard: store.myCard,
+        attendeeName: att.name || '',
+      });
+
+      // Merge: AI fields + ensure attendee email/name are preserved when known
+      const merged = {
+        ...EMPTY_CONTACT,
+        ...extracted,
+        email: att.email || extracted.email || '',
+      };
+      if (att.email) {
+        const aiEmails = Array.isArray(extracted.emails) ? extracted.emails : [];
+        const alreadyHas = aiEmails.some(
+          (e) => (e?.value || '').toLowerCase() === att.email.toLowerCase(),
+        );
+        merged.emails = alreadyHas
+          ? aiEmails
+          : [{ label: 'Personal', value: att.email }, ...aiEmails];
+      }
+      if (!merged.name && att.name) merged.name = att.name;
+
+      setEditForm(merged);
+      setEditFlash(true);
+      setFormReturnView('review_queue');
+      setView('edit');
+      showToast('Review the details and save', theme.ac);
+    } catch (e) {
+      console.warn('AI extraction for attendee failed:', e?.message);
+      showToast('AI extraction failed, filling name only', theme.warn);
+      openBlankFormFromAttendee(item);
+    }
+    setExtractingForAttendee(false);
   }
 
   async function exportMailingList(list, contactsOnList) {
@@ -504,22 +627,33 @@ function AppInner() {
     );
   }
 
-  // Modals that should appear on every screen of the app go here. Each
-  // return block below includes {globalModals} so the paywall, etc., can
-  // surface from any view (DetailScreen, ContactForm, etc).
   const globalModals = (
-    <PaywallModal
-      visible={!!store.paywallReason}
-      reason={store.paywallReason}
-      onDismiss={store.dismissPaywall}
-      onStartTrial={(plan) => handleStartTrial(plan || 'monthly')}
-    />
+    <>
+      <PaywallModal
+        visible={!!store.paywallReason}
+        reason={store.paywallReason}
+        onDismiss={store.dismissPaywall}
+        onStartTrial={(plan) => handleStartTrial(plan || 'monthly')}
+      />
+      <AiFillPromptModal
+        visible={!!aiFillPrompt}
+        theme={theme}
+        attendeeName={aiFillPrompt?.item?.attendee?.name || ''}
+        onYes={() => {
+          const item = aiFillPrompt?.item;
+          setAiFillPrompt(null);
+          if (item) openAiFilledFormFromAttendee(item);
+        }}
+        onNo={() => {
+          const item = aiFillPrompt?.item;
+          setAiFillPrompt(null);
+          if (item) openBlankFormFromAttendee(item);
+        }}
+        onCancel={() => setAiFillPrompt(null)}
+      />
+    </>
   );
 
-  // Trial banner sits at the very top of the screen for trial users only.
-  // Rendered inline (not as a modal) so it pushes content down rather than
-  // overlaying it. Each screen's return path includes {globalBanner} at the
-  // top of its View wrapper.
   const globalBanner = (
     <TrialBanner
       trialActive={store.trialActive}
@@ -554,6 +688,23 @@ function AppInner() {
   }
   if (locked) {
     return <LockScreen pin={store.pin} onUnlock={() => setLocked(false)} />;
+  }
+
+  // Full-screen spinner while AI extraction runs for "Create new" from
+  // the review queue. Lasts ~3-6 seconds.
+  if (extractingForAttendee) {
+    return (
+      <View style={{ flex: 1, backgroundColor: theme.bg, alignItems: 'center', justifyContent: 'center' }}>
+        {globalBanner}
+        <ActivityIndicator color={theme.purp} size="large" />
+        <Text style={{ color: theme.t3, marginTop: 16, fontSize: 13 }}>
+          Reading the transcript...
+        </Text>
+        <Text style={{ color: theme.t5, marginTop: 4, fontSize: 11 }}>
+          Pulling out details about this contact
+        </Text>
+      </View>
+    );
   }
 
   if (view === 'detail' && selected) {
@@ -600,6 +751,7 @@ function AppInner() {
             setEditFlash(false);
             setDupeWarn(null);
             setFormReturnView(null);
+            setPendingAttendeeItem(null);
             if (returnTo) {
               setView(returnTo);
             } else if (selected) {
@@ -911,6 +1063,116 @@ function AppInner() {
       {globalModals}
       <Toast toast={toast} />
     </View>
+  );
+}
+
+// "Have AI fill in details from this conversation?" modal.
+// Shown to Pro users before opening the contact form when they're creating
+// a contact from a Granola queue item. Yes runs AI extraction on the
+// transcript; No opens a blank-prefilled form.
+function AiFillPromptModal({ visible, theme, attendeeName, onYes, onNo, onCancel }) {
+  return (
+    <Modal
+      visible={visible}
+      transparent
+      animationType="fade"
+      onRequestClose={onCancel}
+    >
+      <TouchableOpacity
+        activeOpacity={1}
+        onPress={onCancel}
+        style={{
+          flex: 1,
+          backgroundColor: 'rgba(0,0,0,0.5)',
+          justifyContent: 'center',
+          alignItems: 'center',
+          padding: 20,
+        }}
+      >
+        <TouchableOpacity
+          activeOpacity={1}
+          onPress={() => {}}
+          style={{
+            backgroundColor: theme.bg,
+            borderRadius: 18,
+            borderWidth: 1,
+            borderColor: theme.brd,
+            width: '100%',
+            maxWidth: 420,
+            padding: 20,
+          }}
+        >
+          <Text
+            style={{
+              fontSize: 17,
+              color: theme.t1,
+              fontWeight: '600',
+              marginBottom: 8,
+              fontFamily: theme.fontDisplay,
+            }}
+          >
+            Have AI fill in details?
+          </Text>
+          <Text
+            style={{
+              fontSize: 13,
+              color: theme.t4,
+              lineHeight: 19,
+              marginBottom: 18,
+            }}
+          >
+            {attendeeName
+              ? `AI can read the meeting transcript and pull out everything ${attendeeName} mentioned — company, role, family, interests, deals — to pre-fill the contact card for you to review.`
+              : 'AI can read the meeting transcript and pull out everything mentioned about this contact — company, role, family, interests, deals — to pre-fill the contact card for you to review.'}
+          </Text>
+          <View style={{ gap: 8 }}>
+            <TouchableOpacity
+              onPress={onYes}
+              activeOpacity={0.8}
+              style={{
+                paddingVertical: 12,
+                borderRadius: 10,
+                backgroundColor: theme.purp,
+                alignItems: 'center',
+                flexDirection: 'row',
+                justifyContent: 'center',
+                gap: 8,
+              }}
+            >
+              <Text style={{ color: '#fff', fontSize: 13, fontWeight: '700' }}>
+                Yes, let AI fill it in
+              </Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              onPress={onNo}
+              activeOpacity={0.8}
+              style={{
+                paddingVertical: 12,
+                borderRadius: 10,
+                backgroundColor: theme.bg3,
+                borderWidth: 1,
+                borderColor: theme.brd2,
+                alignItems: 'center',
+              }}
+            >
+              <Text style={{ color: theme.t2, fontSize: 13, fontWeight: '600' }}>
+                No, I'll fill it in myself
+              </Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              onPress={onCancel}
+              activeOpacity={0.8}
+              style={{
+                paddingVertical: 10,
+                alignItems: 'center',
+              }}
+            >
+              <Text style={{ color: theme.t5, fontSize: 12 }}>Cancel</Text>
+            </TouchableOpacity>
+          </View>
+        </TouchableOpacity>
+      </TouchableOpacity>
+    </Modal>
   );
 }
 

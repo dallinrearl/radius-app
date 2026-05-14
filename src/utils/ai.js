@@ -26,17 +26,6 @@ async function callClaude({ system, prompt, max_tokens = 800 }) {
 // Structured output path. Pass a tool schema; Claude is forced to return
 // data matching the schema. The structured `input` is returned directly,
 // already parsed — no JSON.parse, no markdown stripping, no fallbacks.
-//
-// `tool` shape:
-//   {
-//     name: 'extract_contact',
-//     description: 'Extract structured contact info',
-//     input_schema: {
-//       type: 'object',
-//       properties: { name: { type: 'string' }, ... },
-//       required: ['name']
-//     }
-//   }
 async function callClaudeWithTool({ system, prompt, tool, max_tokens = 800 }) {
   const { data, error } = await supabase.functions.invoke('claude', {
     body: {
@@ -57,7 +46,6 @@ async function callClaudeWithTool({ system, prompt, tool, max_tokens = 800 }) {
     throw new Error(data.error);
   }
   if (!data?.tool_input) {
-    // Should not happen when tool_choice forces a tool, but guard anyway.
     console.warn('callClaudeWithTool: no tool_input in response, falling back', data);
     throw new Error('AI did not return structured data');
   }
@@ -70,16 +58,12 @@ function todayISO() {
   return new Date().toISOString().slice(0, 10);
 }
 
-// Returns an ISO date string for N days before today. Used internally.
 function todayMinusDays(n) {
   const d = new Date();
   d.setDate(d.getDate() - n);
   return d.toISOString().slice(0, 10);
 }
 
-// Returns a US-style MM/DD/YYYY string for N days before today.
-// Used in prompts where Claude generates human-facing copy. Reading "last
-// week (5/2/2026)" feels natural; "last week (2026-05-02)" reads like a log.
 function todayMinusDaysUS(n) {
   const d = new Date();
   d.setDate(d.getDate() - n);
@@ -89,7 +73,6 @@ function todayMinusDaysUS(n) {
   return m + '/' + day + '/' + y;
 }
 
-// Today as MM/DD/YYYY.
 function todayUS() {
   return todayMinusDaysUS(0);
 }
@@ -516,24 +499,12 @@ ${HONESTY_RULES}`;
 }
 
 // ---------- aiSuggestContactsForAttendee ----------
-//
-// Given an unmatched Granola attendee + meeting context + the user's
-// contact list, ask Claude to guess which contact (if any) this
-// attendee might be. Returns up to 3 ranked suggestions.
-//
-// Returns an array: [{ contactId, confidence: 'high'|'medium'|'low', reason }]
-// May return [] if Claude can't make any reasonable guess.
-//
-// Trimmed contact format: only id/name/company/role/recent-topic to
-// keep token cost down. Even with 500 contacts this stays cheap.
 
 export async function aiSuggestContactsForAttendee({ attendee, meetingTitle, meetingDate, transcriptSnippet, contacts }) {
   if (!attendee) return [];
   const candidates = (contacts || []).filter((c) => !c.archived);
   if (candidates.length === 0) return [];
 
-  // Build a compact contact roster. Keep it under ~100 candidates to
-  // control token usage; Claude can still narrow even from a small set.
   const trimmed = candidates.slice(0, 200).map((c) => {
     const lastTopic = c.convLog?.[0]?.text
       ? c.convLog[0].text.slice(0, 100).replace(/\s+/g, ' ')
@@ -576,13 +547,10 @@ RULES:
     `Do not invent IDs.
 - If no contact is a plausible match, return an empty suggestions array.
 - "reason" should be ONE short sentence (under 15 words) that names ` +
-    `the specific evidence. e.g. "First name matches, both work in ` +
-    `commercial real estate." or "Mentioned by name in transcript."
-- Confidence: "high" = name + corroborating context (industry, ` +
-    `mutual topic, prior log entry). "medium" = name match alone or ` +
-    `weak corroboration. "low" = thin guess.
-- Do NOT include the user themselves. Do NOT include archived contacts ` +
-    `(they aren't in the candidates list).
+    `the specific evidence.
+- Confidence: "high" = name + corroborating context. "medium" = name ` +
+    `match alone or weak corroboration. "low" = thin guess.
+- Do NOT include the user themselves. Do NOT include archived contacts.
 - A bare first-name match alone is "medium" at best, never "high".
 - Return up to 3 suggestions, ranked best first.`;
 
@@ -600,8 +568,6 @@ RULES:
       })
       .join('\n');
 
-  // Tool schema forces Claude to return data in this exact shape.
-  // No JSON.parse, no markdown stripping, no fallback prose handling.
   const tool = {
     name: 'suggest_contact_matches',
     description: 'Suggest CRM contacts that might match an unmatched meeting attendee.',
@@ -614,19 +580,9 @@ RULES:
           items: {
             type: 'object',
             properties: {
-              contactId: {
-                type: 'string',
-                description: 'Exact contactId from the candidates list. Do not invent.',
-              },
-              confidence: {
-                type: 'string',
-                enum: ['high', 'medium', 'low'],
-                description: 'How confident this match is.',
-              },
-              reason: {
-                type: 'string',
-                description: 'One short sentence (under 15 words) naming specific evidence.',
-              },
+              contactId: { type: 'string' },
+              confidence: { type: 'string', enum: ['high', 'medium', 'low'] },
+              reason: { type: 'string' },
             },
             required: ['contactId', 'confidence', 'reason'],
           },
@@ -645,7 +601,6 @@ RULES:
   }
 
   const suggestions = Array.isArray(result?.suggestions) ? result.suggestions : [];
-  // Validate against known IDs and clamp.
   const knownIds = new Set(candidates.map((c) => c.id));
   return suggestions
     .filter((s) => s && knownIds.has(s.contactId))
@@ -660,19 +615,10 @@ RULES:
 }
 
 // ---------- aiSummarizeMeetingForReview ----------
-//
-// For the review queue. Generates a summary focused on the OTHER attendees
-// (not the user) so the user can decide which of their CRM contacts the
-// unmatched attendees correspond to.
-//
-// Truncates input to ~3000 chars before sending. Real meeting transcripts
-// can be 10K-30K tokens, but the first chunk + a tail slice is enough to
-// identify speakers. Main cost lever — without truncation each call is
-// ~$0.03; with it, ~$0.005.
 
 function trimForMeetingSummary(rawText) {
   if (!rawText) return '';
-  const max = 3000; // chars, roughly 750 tokens
+  const max = 3000;
   if (rawText.length <= max) return rawText;
   const headLen = Math.floor(max * 0.7);
   const tailLen = max - headLen;
@@ -705,27 +651,9 @@ HARD RULES:
 - Maximum 3 sentences. Often 1-2 is enough.
 - Around 30-60 words total. Tight.
 - Focus ONLY on the people who are NOT the user. The user is excluded.
-- For each non-user speaker: name + company + role/context + anything ` +
-    `identifying (location, what they do, who they know, what they're ` +
-    `working on).
-- Skip: anything about the user, biographical histories, career arcs ` +
-    `going back years, who introduced whom, relationship dynamics.
-- If a non-user speaker has no name (just "Speaker B" etc), say so. ` +
-    `Don't invent.
-
-EXAMPLE GOOD OUTPUT:
-"Lane: Bank of Utah, commercial lending, ~1 year tenure. Interested in ` +
-    `lending partnership for extended-stay hotel deals."
-
-EXAMPLE BAD OUTPUT (mentions the user):
-"Dallin (West 77 Partners) met with Lane (Bank of Utah, commercial ` +
-    `lending) to explore a lending partnership..." (this is wrong — ` +
-    `the user is Dallin, his info is irrelevant to him)
-
-EXAMPLE BAD OUTPUT (too long, biographical):
-"Lane has been at Bank of Utah for about a year, prior to which he ` +
-    `worked at Wells Fargo. He grew up in Idaho..." (this is wrong — ` +
-    `extra biographical fluff that doesn't help identify them)
+- For each non-user speaker: name + company + role/context + anything identifying.
+- Skip: anything about the user, biographical histories, career arcs.
+- If a non-user speaker has no name (just "Speaker B" etc), say so. Don't invent.
 
 NO HEADERS. NO BULLETS. NO PREAMBLE. Just the focused identification.
 
@@ -739,16 +667,16 @@ ${HONESTY_RULES}`;
 
 // ---------- aiExtractFromVoice ----------
 //
-// Extract every field a user might mention in a voice transcript. The schema
-// matches the contact form's data model exactly (see ContactForm.js):
-//   - phones/emails as arrays of {label, value}
-//   - addresses as full objects with label/line1/line2/city/state/zip/country
-//   - birthday/anniversary as {month, day, year} objects
-//   - kids as full objects matching the form's KidRow shape
+// Extract every field a user might mention in a voice transcript OR a
+// meeting transcript. Used for two paths:
+//   1. Voice memo → new contact (AddScreen voice mode)
+//   2. Granola transcript → new contact (review queue "Create new")
 //
-// Anything the form has, the AI knows to look for. Empty values (string ""
-// or array []) are returned for anything not mentioned. The caller spreads
-// the result into EMPTY_CONTACT, so missing keys won't clobber form defaults.
+// When myCard is provided (Granola path), the AI is told explicitly
+// who the USER is so it can route first-person statements correctly:
+// "I have three kids" said by the user is NOT a fact about the contact.
+//
+// The schema matches the contact form's data model exactly.
 
 const EMPTY_VOICE_RESULT = {
   name: '',
@@ -776,131 +704,127 @@ const EMPTY_VOICE_RESULT = {
   anniversary: null,
   kids: [],
   interests: [],
-  // Touchpoint: only set if the transcript describes an actual interaction
-  // (met, called, emailed, etc). Null for pure background-info dictations.
   touchpoint: null,
 };
 
-export async function aiExtractFromVoice(transcript) {
+export async function aiExtractFromVoice(transcript, opts = {}) {
   if (!transcript?.trim()) {
     return { ...EMPTY_VOICE_RESULT };
   }
 
+  const myCard = opts.myCard || null;
+  const attendeeHint = (opts.attendeeName || '').trim();
+
+  // Build a "who is who" line that goes near the top of the prompt.
+  // For the Granola path, this is critical — without it the AI treats
+  // first-person "I" statements in the transcript as facts about the
+  // contact, which puts the user's own info on the wrong card.
+  let userIdLine = '';
+  let attendeeLine = '';
+  if (myCard) {
+    const userName = (myCard.name || '').trim();
+    const userCompany = (myCard.company || '').trim();
+    const userRole = (myCard.role || '').trim();
+    if (userName) {
+      userIdLine =
+        `IMPORTANT: The user (the person USING this CRM, who is one of the ` +
+        `speakers in the transcript) is ${userName}` +
+        (userRole ? `, ${userRole}` : '') +
+        (userCompany ? ` at ${userCompany}` : '') + '. ' +
+        `The user is NOT the contact you are extracting. Do NOT put the ` +
+        `user's name, company, family, kids, interests, or any other ` +
+        `details into the contact fields. The contact is the OTHER ` +
+        `speaker(s) in the conversation.`;
+    }
+  }
+  if (attendeeHint) {
+    attendeeLine =
+      `The contact being created is named "${attendeeHint}" (this name ` +
+      `came from the meeting attendee list). Use this as the contact's ` +
+      `name and extract everything ELSE the transcript reveals about ` +
+      `THIS specific person.`;
+  }
+
   const today = todayUS();
   const system =
-    `You extract structured contact information from voice transcripts where ` +
-    `the user is dictating notes about a person they know. Pull EVERY field ` +
-    `the transcript mentions. Use empty string "", empty array [], false, ` +
-    `or null for fields the transcript does not specify. Do not invent or ` +
-    `infer details not clearly stated. The 'notes' field MUST be the original ` +
-    `transcript verbatim so the user keeps the full source for reference.
+    `You extract structured contact information from a transcript. The ` +
+    `transcript may be:
+  (a) a voice memo the user dictated about a person they know, OR
+  (b) a meeting transcript between the user and one or more other people.
 
-WHAT TO LOOK FOR:
+${userIdLine}
+${attendeeLine}
 
-Basic: name, company name, job title (role), LinkedIn handle/URL.
-Priority: set priority=true ONLY if user explicitly calls them VIP, ` +
-    `important, top priority, etc.
+For case (a) the user is describing the contact in third person, easy.
+For case (b) you need to figure out which speaker is the user (skip ` +
+    `their info) and which is the contact (extract their info).
+
+INTERPRETING SPEAKERS IN A MEETING TRANSCRIPT:
+- First-person statements ("I", "my", "we") are the SPEAKER, not the contact.
+- If the user is one of the speakers (case b above), first-person statements ` +
+    `from the user are about the USER, NOT the contact. Do NOT extract those.
+- If a speaker says "I have two kids named X and Y" and that speaker is the ` +
+    `USER, those kids belong to the user, NOT the contact.
+- If a speaker says "I have two kids named X and Y" and that speaker is the ` +
+    `CONTACT, those kids DO belong to the contact.
+- Match speakers to names using context: role, company, family, location ` +
+    `details should align with the right person.
+- If you genuinely cannot tell who said what, leave the field empty rather ` +
+    `than guess.
+
+WHAT TO LOOK FOR (about the contact):
+
+Basic: name, company, role, LinkedIn handle/URL.
+Priority: priority=true ONLY if explicitly called VIP/important.
 
 Contact info:
-- phones: array of {label, value}. Labels: "Cell", "Work", "Home", or any ` +
-    `phrase the user says ("his cell", "office line"). Format value as ` +
-    `(XXX) XXX-XXXX if possible.
-- emails: array of {label, value}. Labels: "Personal", "Work", or what ` +
-    `user says.
-- addresses: array of full address objects with {label, line1, line2, city, ` +
-    `state, zip, country}. Label like "Home", "Work", "Beach House".
-- recipientName: only if user specifies a different name for mail (e.g. ` +
-    `"send mail to The Smith Family").
+- phones: array of {label, value}. Labels: Cell/Work/Home/Other.
+- emails: array of {label, value}. Labels: Personal/Work/Other.
+- addresses: array of {label, line1, line2, city, state, zip, country}.
+- recipientName: only if specified.
 
 Context:
-- howMet: where/how they met. Resolve relative dates ("yesterday", ` +
-    `"last week") to MM/DD/YYYY. Today is ${today}.
-  Examples: "last week" → "around ${todayMinusDaysUS(7)}", ` +
-    `"yesterday" → "yesterday (${todayMinusDaysUS(1)})", ` +
-    `"a few months ago" → "around ${todayMinusDaysUS(90)}".
-  ALWAYS use MM/DD/YYYY. Never lead with year.
-- howHelp: things the user can do for this person.
-- topics: subjects they care about discussing, comma-separated.
-- tags: relationship category like Friend, Colleague, Mentor, Client, ` +
-    `Vendor, Advisor. Title case. Pick what fits.
+- howMet: where/how the contact was met. Resolve "last week" to ${todayMinusDaysUS(7)}, ` +
+    `"yesterday" to ${todayMinusDaysUS(1)}, etc. Today is ${today}.
+- howHelp: things the user can do for this contact.
+- topics: subjects the contact cares about discussing.
+- tags: relationship category like Friend, Colleague, Mentor, Client, Vendor.
 
-Background & Experience:
-- experience: notable career background, education, achievements.
-- pastCompanies: array of {company, role} for previous jobs.
+Background:
+- experience: notable career background, education, achievements OF THE CONTACT.
+- pastCompanies: array of {company, role} for the contact's previous jobs.
 
-Personal:
-- hometown: where they grew up / are from.
-- location: where they live now.
-- timezone: ET, CT, MT, PT if explicitly stated.
-- birthday: {month, day, year} object. Use null for unknown components. ` +
-    `Examples: "born March 15" → {month: 3, day: 15, year: null}. ` +
-    `"born 1985" → {month: null, day: null, year: 1985}.
-- married: "married", "single", "divorced", "widowed". Lowercase. Empty ` +
-    `string if unknown.
-- spouseName: spouse/partner first name (or full name) if mentioned.
-- anniversary: same {month, day, year} format as birthday.
-- kids: array of full kid objects (see KIDS FORMAT below).
-- interests: hobbies, sports, things they like to do. Title case where ` +
-    `natural ("Rock Climbing", "Cooking").
+Personal (ABOUT THE CONTACT, not the user):
+- hometown: where the contact grew up.
+- location: where the contact lives now.
+- timezone: ET, CT, MT, PT if stated.
+- birthday: {month, day, year}. Use null for unknown components.
+- married: "married", "single", "divorced", "widowed" — about the CONTACT.
+- spouseName: contact's spouse name.
+- anniversary: same {month, day, year} format.
+- kids: the CONTACT's kids only.
+- interests: the contact's hobbies/sports/etc.
 
 KIDS FORMAT:
 Each kid is { name, gender, age, ageMode, ageAsOf, birthday, notes }:
-- name: child's name if mentioned, "" otherwise
-- gender: "boy" or "girl" if mentioned, "boy" as default if unspecified
-- age: numeric age as string ("5", "2.5"), "" if not mentioned
-- ageMode: "age" if user said an age number, "birthday" if user gave a date
-- ageAsOf: if age is set, use { age: <number>, asOf: "${todayUS()}" }; else null
-- birthday: same {month,day,year} object as parent's birthday, or null
-- notes: any specific details about the child, "" otherwise
-
-IMPORTANT EXAMPLES:
-- "his wife Sarah and their two kids, Tommy who's 5 and a baby girl" →
-  married="married", spouseName="Sarah",
-  kids=[
-    {name:"Tommy", gender:"boy", age:"5", ageMode:"age", ageAsOf:{age:5,asOf:"${todayUS()}"}, birthday:null, notes:""},
-    {name:"", gender:"girl", age:"", ageMode:"age", ageAsOf:null, birthday:null, notes:"baby"}
-  ]
-- "from Chicago, lives in Denver" → hometown="Chicago", location="Denver"
-- "she's a VIP" → priority=true
-- "loves rock climbing and Italian food" → interests=["Rock Climbing", "Italian Food"]
+- name, age (string), gender (boy/girl), notes
+- ageMode: "age" if number, "birthday" if date
+- ageAsOf: if age set, { age: <number>, asOf: "${todayUS()}" }; else null
+- birthday: {month,day,year} object or null
 
 QUALITY BAR: Better to leave a field empty than guess. Do not fabricate.
+NOTES FIELD: must be the original transcript verbatim, no edits.
 
-TOUCHPOINT (separate from notes):
-A "touchpoint" is a logged interaction with this person. Set the touchpoint ` +
-    `field ONLY IF the transcript describes an actual interaction the user ` +
-    `had with them. Background descriptions ("she's a VP at Blackrock, lives ` +
-    `in Austin, has two kids") are NOT touchpoints — return null.
+TOUCHPOINT (only for voice memos describing an interaction, NOT for ` +
+    `meeting transcripts):
+For meeting transcripts (case b above), the caller handles the touchpoint ` +
+    `separately. Always return touchpoint: null for meeting transcripts.
 
-If a touchpoint exists, return:
-  { date, type, text }
-- date: YYYY-MM-DD format. Today is ${todayISO()}. Resolve relative ` +
-    `phrases ("yesterday", "last Tuesday", "two weeks ago") to absolute dates.
-- type: one of "call", "email", "text", "meeting", "linkedin", "other".
-  Detect from the verb in the transcript:
-    - "met", "saw", "ran into", "had coffee", "lunch", "in person" → "meeting"
-    - "called", "spoke with", "phone call" → "call"
-    - "emailed", "sent an email", "got an email from" → "email"
-    - "texted", "DM'd via SMS" → "text"
-    - "messaged on LinkedIn", "LinkedIn DM" → "linkedin"
-    - anything else (DM on other platform, voice memo, etc.) → "other"
-- text: a clean ~1-2 sentence summary of WHAT was discussed or what happened. ` +
-    `NOT the full transcript. Just the substance of the interaction. Strip ` +
-    `the background facts (which go to other fields) and keep only what ` +
-    `would be useful for the user to remember about this specific touchpoint.
-
-EXAMPLES:
-- "Met John yesterday at the conference. He's a VP at Blackrock and lives ` +
-    `in Austin." →
-  touchpoint = { date: "${todayMinusDays(1)}", type: "meeting", ` +
-    `text: "Met at the conference." }
-  (and company/role/location go to their respective fields)
-- "John is a VP at Blackrock, lives in Austin, married to Sarah." → 
-  touchpoint = null (no interaction described)
-- "Called Maria last Tuesday about the Q3 deck. She wants more detail on ` +
-    `the assumptions." →
-  touchpoint = { date: <last Tuesday>, type: "call", text: "Discussed the ` +
-    `Q3 deck. She wants more detail on the assumptions." }`;
+For voice memos, return touchpoint = { date, type, text } only if user ` +
+    `describes an actual interaction. Otherwise null.
+- date: YYYY-MM-DD. Today is ${todayISO()}.
+- type: call/email/text/meeting/linkedin/other
+- text: 1-2 sentence summary, not the full transcript.`;
 
   const prompt = `Transcript:\n${transcript}`;
 
@@ -916,22 +840,19 @@ EXAMPLES:
 
   const tool = {
     name: 'extract_contact',
-    description: 'Extract structured contact information from a voice transcript.',
+    description: 'Extract structured contact information from a transcript.',
     input_schema: {
       type: 'object',
       properties: {
         name: { type: 'string' },
         company: { type: 'string' },
         role: { type: 'string' },
-        priority: { type: 'boolean', description: 'True only if user marks them VIP/priority.' },
+        priority: { type: 'boolean' },
         phones: {
           type: 'array',
           items: {
             type: 'object',
-            properties: {
-              label: { type: 'string' },
-              value: { type: 'string' },
-            },
+            properties: { label: { type: 'string' }, value: { type: 'string' } },
             required: ['label', 'value'],
           },
         },
@@ -939,10 +860,7 @@ EXAMPLES:
           type: 'array',
           items: {
             type: 'object',
-            properties: {
-              label: { type: 'string' },
-              value: { type: 'string' },
-            },
+            properties: { label: { type: 'string' }, value: { type: 'string' } },
             required: ['label', 'value'],
           },
         },
@@ -974,10 +892,7 @@ EXAMPLES:
           type: 'array',
           items: {
             type: 'object',
-            properties: {
-              company: { type: 'string' },
-              role: { type: 'string' },
-            },
+            properties: { company: { type: 'string' }, role: { type: 'string' } },
             required: ['company', 'role'],
           },
         },
@@ -1001,7 +916,7 @@ EXAMPLES:
                 type: ['object', 'null'],
                 properties: {
                   age: { type: 'number' },
-                  asOf: { type: 'string', description: 'YYYY-MM-DD' },
+                  asOf: { type: 'string' },
                 },
               },
               birthday: dateObjectSchema,
@@ -1013,18 +928,13 @@ EXAMPLES:
         interests: { type: 'array', items: { type: 'string' } },
         touchpoint: {
           type: ['object', 'null'],
-          description:
-            'Set ONLY if transcript describes an actual interaction (met, called, etc). Null for pure background-info dictations.',
           properties: {
-            date: { type: 'string', description: 'YYYY-MM-DD format.' },
+            date: { type: 'string' },
             type: {
               type: 'string',
               enum: ['call', 'email', 'text', 'meeting', 'linkedin', 'other'],
             },
-            text: {
-              type: 'string',
-              description: 'Brief 1-2 sentence summary of the interaction.',
-            },
+            text: { type: 'string' },
           },
         },
       },
@@ -1040,10 +950,6 @@ EXAMPLES:
     return { ...EMPTY_VOICE_RESULT, notes: transcript };
   }
 
-  // Normalize the result against the empty template — anything Claude
-  // didn't return falls back to the empty default. Arrays/objects are
-  // checked for shape before being passed through so the form doesn't
-  // choke on missing fields.
   const safeArr = (v) => (Array.isArray(v) ? v : []);
   const safeStr = (v) => (typeof v === 'string' ? v : '');
   const safeDateObj = (v) =>
@@ -1109,9 +1015,6 @@ EXAMPLES:
       notes: safeStr(k?.notes),
     })),
     interests: safeArr(result.interests).map(safeStr).filter(Boolean),
-    // Touchpoint: only kept if Claude returned all three required fields
-    // and type is a valid TOUCH_TYPES value. Otherwise null. The caller
-    // checks for null before adding to convLog.
     touchpoint: (() => {
       const tp = result.touchpoint;
       if (!tp || typeof tp !== 'object') return null;
@@ -1139,27 +1042,13 @@ export async function aiExtractFromImage(_base64) {
 }
 
 // ---------- aiSuggestOutreaches ----------
-//
-// Looks at the user's whole contact list and surfaces 2-5 people the user
-// should reach out to right now, each with a strong "why now" reason.
-// Used by Next Up's AI mode.
-//
-// Quality bar: better to return 2 strong picks than 5 mediocre ones. The
-// prompt explicitly tells Claude to skip rather than fill quota.
-//
-// Returns an array of:
-//   { contactId, reason, urgency: 'high'|'medium'|'low', suggestedAction }
 
 export async function aiSuggestOutreaches({ contacts, myCard }) {
-  // Filter out archived and contacts with no useful signal
   const candidates = (contacts || []).filter((c) => !c.archived);
   if (candidates.length === 0) return [];
 
   const today = todayUS();
 
-  // Build a compact representation of each contact. Send only signals
-  // relevant to "should I reach out": last contact date, frequency, tags,
-  // priority, recent log topics, upcoming dates.
   const contactSummaries = candidates.map((c) => {
     const lastContact = c.lastContacted
       ? `${c.lastContacted} (${daysBetween(c.lastContacted)}d ago)`
@@ -1189,13 +1078,9 @@ export async function aiSuggestOutreaches({ contacts, myCard }) {
     };
   });
 
-  // To stay under token limits and keep costs down, cap the candidate list
-  // at 80 contacts. If user has more, prioritize by signal.
   let trimmed = contactSummaries;
   if (trimmed.length > 80) {
     trimmed.sort((a, b) => {
-      // Priority contacts first, then those with frequency set, then by
-      // last contact date (oldest first as those need more attention).
       if (a.priority !== b.priority) return b.priority - a.priority;
       if (!!a.freq !== !!b.freq) return (b.freq ? 1 : 0) - (a.freq ? 1 : 0);
       return 0;
@@ -1216,24 +1101,10 @@ Today's date: ${today}.
 
 CRITICAL QUALITY BAR:
 - Return between 2 and 5 suggestions. NEVER pad to hit a quota.
-- 2 strong suggestions > 5 weak ones. Prefer fewer if signals are thin.
-- Each suggestion needs a SPECIFIC, COMPELLING reason — not generic ("haven't talked in a while").
-- Look for genuinely actionable triggers:
-  * Stagnation on a high-priority relationship (priority + long gap)
-  * Upcoming birthday/anniversary within ~10 days
-  * Recent log entry mentioning a future follow-up ("send slides", "circle back next week")
-  * Frequency overdue by 50%+ for someone marked priority
-  * Patterns that suggest the relationship is slipping
-- DO NOT suggest someone just because the frequency clock says they're due — that's covered by the manual mode already.
-- DO NOT suggest someone with very thin context (no log, no priority, no upcoming dates).
+- Each suggestion needs a SPECIFIC, COMPELLING reason.
+- Look for genuinely actionable triggers.
 
-For each suggestion provide:
-- contactId: exact id from the candidates list
-- reason: ONE sentence (under 25 words) naming the specific evidence and why now matters. Cite specifics from their data.
-- urgency: 'high' (act this week), 'medium' (next 1-2 weeks), 'low' (when convenient)
-- suggestedAction: ONE short sentence with a concrete next step (e.g. "Send a quick congratulations on the new role" or "Share the article you mentioned in your last call")
-
-Tone for reason and suggestedAction: warm, specific, like advice from a thoughtful friend who knows the relationship. Not salesy, not generic.`;
+For each suggestion provide contactId, reason, urgency, suggestedAction.`;
 
   const prompt = `Contacts in the network:\n` +
     trimmed
@@ -1259,7 +1130,7 @@ Tone for reason and suggestedAction: warm, specific, like advice from a thoughtf
 
   const tool = {
     name: 'suggest_outreaches',
-    description: 'Recommend 2-5 contacts to reach out to with specific, evidence-based reasons.',
+    description: 'Recommend 2-5 contacts to reach out to.',
     input_schema: {
       type: 'object',
       properties: {
@@ -1267,26 +1138,13 @@ Tone for reason and suggestedAction: warm, specific, like advice from a thoughtf
           type: 'array',
           minItems: 2,
           maxItems: 5,
-          description: '2-5 ranked outreach suggestions. Empty acceptable only if zero compelling triggers.',
           items: {
             type: 'object',
             properties: {
-              contactId: {
-                type: 'string',
-                description: 'Exact id from the candidates list. Do not invent.',
-              },
-              reason: {
-                type: 'string',
-                description: 'One specific sentence (under 25 words) citing evidence and why now.',
-              },
-              urgency: {
-                type: 'string',
-                enum: ['high', 'medium', 'low'],
-              },
-              suggestedAction: {
-                type: 'string',
-                description: 'One short sentence with a concrete next step.',
-              },
+              contactId: { type: 'string' },
+              reason: { type: 'string' },
+              urgency: { type: 'string', enum: ['high', 'medium', 'low'] },
+              suggestedAction: { type: 'string' },
             },
             required: ['contactId', 'reason', 'urgency', 'suggestedAction'],
           },
@@ -1315,4 +1173,147 @@ Tone for reason and suggestedAction: warm, specific, like advice from a thoughtf
       urgency: ['high', 'medium', 'low'].includes(s.urgency) ? s.urgency : 'medium',
       suggestedAction: typeof s.suggestedAction === 'string' ? s.suggestedAction.slice(0, 200) : '',
     }));
+}// =============================================================
+// PASTE THIS INTO src/utils/ai.js
+//
+// Add this function anywhere among the other exports (e.g. right after
+// `aiSummarizeMeetingForReview`). Do NOT replace any existing exports.
+// =============================================================
+
+// ---------- aiExtractAttendeesFromTranscript ----------
+//
+// When Granola returns only the user as an attendee (or no attendees at
+// all), we still want to identify the OTHER people in the conversation
+// so they can be queued for review. This function reads the transcript
+// and returns a list of identified speakers other than the user.
+//
+// Returns an array of:
+//   { name, email, identifyingContext }
+//
+// Empty array if no other speakers can be confidently identified.
+
+export async function aiExtractAttendeesFromTranscript(rawText, myCard) {
+  if (!rawText?.trim()) return [];
+
+  const userName = (myCard?.name || '').trim();
+  const userCompany = (myCard?.company || '').trim();
+  const userRole = (myCard?.role || '').trim();
+
+  const userIdLine = userName
+    ? `The user (the person USING this CRM, who is one of the speakers in ` +
+      `the transcript) is ${userName}` +
+      (userRole ? `, ${userRole}` : '') +
+      (userCompany ? ` at ${userCompany}` : '') + '. ' +
+      `The user is NOT a candidate for the output — exclude them entirely.`
+    : `The user is one of the speakers. Try to infer which speaker they ` +
+      `aren't, and exclude them from the output.`;
+
+  const system =
+    `You read a meeting/conversation transcript and identify the OTHER ` +
+    `people who participated (besides the user). The transcript was ` +
+    `recorded by the user from a separate device, so the transcript ` +
+    `service only labeled the user as an attendee. Your job is to find ` +
+    `the rest from the transcript content.
+
+${userIdLine}
+
+WHAT TO RETURN:
+For each OTHER speaker in the transcript, return:
+  - name: the speaker's full name if mentioned, or first name if that's ` +
+    `all the transcript reveals. Empty string only if the speaker is ` +
+    `referenced but never named.
+  - email: their email if mentioned in the transcript. Empty string ` +
+    `otherwise.
+  - identifyingContext: one short sentence (under 25 words) with ` +
+    `whatever helps identify this person: company, role, where they ` +
+    `live, what they're working on, how they know the user. Used as ` +
+    `the "suggestion reason" when the user reviews these.
+
+RULES:
+- Return ONLY speakers who are NOT the user.
+- A speaker must be referenced or identified clearly enough that the ` +
+    `user could recognize who they mean. If someone just appears as ` +
+    `"Speaker B" with no clues, skip them.
+- If the user mentions someone by name who is NOT a speaker (e.g. ` +
+    `"my friend Sarah back in Denver"), do NOT include them. Only ` +
+    `actual participants in the conversation.
+- Better to return fewer high-quality identifications than many guesses.
+- If you cannot identify any other speakers with reasonable confidence, ` +
+    `return an empty array. Do not invent.
+- Never include the user.
+
+EXAMPLES:
+
+Good: { name: "Marcus Johnson", email: "", identifyingContext: "Senior ` +
+    `Partner at Ridgeline Advisors in Denver, met through a former colleague." }
+Good: { name: "Lane", email: "", identifyingContext: "Commercial lender ` +
+    `at Bank of Utah, exploring lending partnership for hotel deals." }
+Bad: { name: "Unknown Speaker", ... }   (skip instead)
+Bad: returning the user themselves.`;
+
+  const prompt = `Transcript:\n\n${rawText}`;
+
+  const tool = {
+    name: 'extract_other_attendees',
+    description:
+      'Identify the speakers in a transcript who are NOT the user.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        attendees: {
+          type: 'array',
+          description: 'Other speakers identified. Empty array if none.',
+          items: {
+            type: 'object',
+            properties: {
+              name: { type: 'string' },
+              email: { type: 'string' },
+              identifyingContext: { type: 'string' },
+            },
+            required: ['name', 'email', 'identifyingContext'],
+          },
+        },
+      },
+      required: ['attendees'],
+    },
+  };
+
+  let result;
+  try {
+    result = await callClaudeWithTool({ system, prompt, tool, max_tokens: 800 });
+  } catch (e) {
+    console.error('aiExtractAttendeesFromTranscript failed:', e?.message);
+    return [];
+  }
+
+  const list = Array.isArray(result?.attendees) ? result.attendees : [];
+  // Dedupe by lowercase name+email, and filter out any that look like the user
+  const myNameLower = userName.toLowerCase();
+  const myEmailsLower = new Set();
+  if (myCard?.email) myEmailsLower.add(myCard.email.toLowerCase());
+  if (Array.isArray(myCard?.emails)) {
+    for (const e of myCard.emails) {
+      if (e?.value) myEmailsLower.add(e.value.toLowerCase());
+    }
+  }
+
+  const seen = new Set();
+  const out = [];
+  for (const a of list) {
+    const name = (a?.name || '').trim();
+    const email = (a?.email || '').trim();
+    const context = (a?.identifyingContext || '').trim();
+    if (!name && !email) continue;
+    if (name && myNameLower && name.toLowerCase() === myNameLower) continue;
+    if (email && myEmailsLower.has(email.toLowerCase())) continue;
+    const key = (email || name).toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({
+      name,
+      email,
+      identifyingContext: context.slice(0, 200),
+    });
+  }
+  return out;
 }

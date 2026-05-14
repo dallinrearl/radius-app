@@ -1,7 +1,8 @@
 import React, { useState } from 'react';
-import { View, Text, TextInput, TouchableOpacity, ActivityIndicator, Alert } from 'react-native';
+import { View, Text, TextInput, TouchableOpacity, ActivityIndicator, Alert, Linking } from 'react-native';
 import { useTheme } from '../styles/theme';
 import { signUp, signIn } from '../lib/auth';
+import { PRIVACY_POLICY_URL, TERMS_OF_SERVICE_URL } from '../constants/legal';
 
 export default function AuthScreen({ onAuthed }) {
   const { theme } = useTheme();
@@ -159,6 +160,36 @@ export default function AuthScreen({ onAuthed }) {
           </Text>
         )}
       </TouchableOpacity>
+
+      {/* Agreement line. Only on signup, since existing users already accepted. */}
+      {mode === 'signup' && (
+        <Text
+          style={{
+            color: theme.t5,
+            fontSize: 11,
+            textAlign: 'center',
+            lineHeight: 16,
+            marginBottom: 16,
+            paddingHorizontal: 12,
+          }}
+        >
+          By creating an account, you agree to our{' '}
+          <Text
+            style={{ color: theme.ac, textDecorationLine: 'underline' }}
+            onPress={() => Linking.openURL(TERMS_OF_SERVICE_URL)}
+          >
+            Terms of Service
+          </Text>
+          {' '}and{' '}
+          <Text
+            style={{ color: theme.ac, textDecorationLine: 'underline' }}
+            onPress={() => Linking.openURL(PRIVACY_POLICY_URL)}
+          >
+            Privacy Policy
+          </Text>
+          .
+        </Text>
+      )}
 
       <TouchableOpacity onPress={() => { setMode(mode === 'signin' ? 'signup' : 'signin'); setError(''); }}>
         <Text style={{ color: theme.t4, textAlign: 'center', fontSize: 14 }}>

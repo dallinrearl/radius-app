@@ -41,8 +41,9 @@ import {
   COMMON_TAG_LABELS,
 } from '../constants/tagLibrary';
 import { testKey as granolaTestKey } from '../utils/granola';
-import { runGranolaSync } from '../utils/granolaSync';
+import { runGranolaSync, reprocessSelfOnlyItems } from '../utils/granolaSync';
 import { createPortalSession } from '../lib/stripeApi';
+import { PRIVACY_POLICY_URL, TERMS_OF_SERVICE_URL } from '../constants/legal';
 import * as FileSystem from 'expo-file-system';
 import * as Sharing from 'expo-sharing';
 import * as Contacts from 'expo-contacts';
@@ -51,7 +52,6 @@ const GRANOLA_KEY_STORAGE = 'crm-granola-key';
 const GRANOLA_LAST_SYNC_STORAGE = 'crm-granola-last-sync';
 const GRANOLA_PROCESSED_IDS_STORAGE = 'crm-granola-processed-ids';
 
-// Cross-platform confirm. Mirrors the pattern from DetailScreen / SwipeDeleteCard.
 function confirmAction(title, message, onConfirm, confirmLabel = 'OK') {
   if (Platform.OS === 'web') {
     if (typeof window !== 'undefined' && window.confirm) {
@@ -95,7 +95,6 @@ export default function SettingsScreen({
   onClearReviewQueue,
   onOpenReviewQueue,
   granolaAiUnlocked,
-  // Tier / subscription
   tier,
   effectiveTier,
   trialActive,
@@ -115,7 +114,6 @@ export default function SettingsScreen({
     setOpenSection(openSection === s ? null : s);
   }
 
-  // ============== Subscription portal ==============
   async function openBillingPortal() {
     if (portalLoading) return;
     setPortalLoading(true);
@@ -134,7 +132,6 @@ export default function SettingsScreen({
     setPortalLoading(false);
   }
 
-  // ============== Data actions ==============
   async function importContacts() {
     const perm = await Contacts.requestPermissionsAsync();
     if (perm.status !== 'granted') {
@@ -223,7 +220,6 @@ export default function SettingsScreen({
     }
   }
 
-  // ============== Danger zone actions ==============
   function handleDeleteAllContacts() {
     confirmAction(
       'Delete all contacts',
@@ -297,9 +293,6 @@ export default function SettingsScreen({
           Settings
         </Text>
 
-        {/* ============================================================
-            ACCOUNT (profile header card — myCard + subscription)
-            ============================================================ */}
         <SectionLabel theme={theme} text="Account" />
 
         <SettingsSection
@@ -399,9 +392,6 @@ export default function SettingsScreen({
           <ChevronRight size={16} color={theme.t5} />
         </TouchableOpacity>
 
-        {/* ============================================================
-            PREFERENCES (Appearance + Notifications stub)
-            ============================================================ */}
         <SectionLabel theme={theme} text="Preferences" />
 
         <View
@@ -438,9 +428,6 @@ export default function SettingsScreen({
           subtitle="Reminders, daily digest, birthdays"
         />
 
-        {/* ============================================================
-            ORGANIZATION (Tags / Interests / Mailing Lists)
-            ============================================================ */}
         <SectionLabel theme={theme} text="Organization" />
 
         <SettingsSection
@@ -501,9 +488,6 @@ export default function SettingsScreen({
           <ChevronRight size={16} color={theme.t5} />
         </TouchableOpacity>
 
-        {/* ============================================================
-            INTEGRATIONS (Granola only for now)
-            ============================================================ */}
         <SectionLabel theme={theme} text="Integrations" />
 
         <SettingsSection
@@ -520,6 +504,7 @@ export default function SettingsScreen({
             showToast={showToast}
             reviewQueue={reviewQueue}
             onAddToReviewQueue={onAddToReviewQueue}
+            onRemoveFromReviewQueue={onRemoveFromReviewQueue}
             onClearReviewQueue={onClearReviewQueue}
             onOpenReviewQueue={onOpenReviewQueue}
             granolaAiUnlocked={granolaAiUnlocked}
@@ -540,9 +525,6 @@ export default function SettingsScreen({
           subtitle="Snap a card, get a contact (Pro)"
         />
 
-        {/* ============================================================
-            DATA
-            ============================================================ */}
         <SectionLabel theme={theme} text="Data" />
 
         <SettingsSection
@@ -628,9 +610,6 @@ export default function SettingsScreen({
           </View>
         </SettingsSection>
 
-        {/* ============================================================
-            HELP & ABOUT
-            ============================================================ */}
         <SectionLabel theme={theme} text="Help & About" />
 
         <TouchableOpacity
@@ -685,6 +664,52 @@ export default function SettingsScreen({
           <ChevronRight size={16} color={theme.t5} />
         </TouchableOpacity>
 
+        <TouchableOpacity
+          onPress={() => Linking.openURL(PRIVACY_POLICY_URL)}
+          style={{
+            backgroundColor: theme.bg2,
+            borderWidth: 1,
+            borderColor: theme.brd,
+            borderRadius: 14,
+            padding: 14,
+            marginBottom: 10,
+            flexDirection: 'row',
+            alignItems: 'center',
+            gap: 12,
+          }}
+        >
+          <LockIcon size={18} color={theme.t4} />
+          <View style={{ flex: 1 }}>
+            <Text style={{ color: theme.t1, fontSize: 14, fontWeight: '500' }}>
+              Privacy Policy
+            </Text>
+          </View>
+          <ChevronRight size={16} color={theme.t5} />
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          onPress={() => Linking.openURL(TERMS_OF_SERVICE_URL)}
+          style={{
+            backgroundColor: theme.bg2,
+            borderWidth: 1,
+            borderColor: theme.brd,
+            borderRadius: 14,
+            padding: 14,
+            marginBottom: 10,
+            flexDirection: 'row',
+            alignItems: 'center',
+            gap: 12,
+          }}
+        >
+          <CardIcon size={18} color={theme.t4} />
+          <View style={{ flex: 1 }}>
+            <Text style={{ color: theme.t1, fontSize: 14, fontWeight: '500' }}>
+              Terms of Service
+            </Text>
+          </View>
+          <ChevronRight size={16} color={theme.t5} />
+        </TouchableOpacity>
+
         <View
           style={{
             backgroundColor: theme.bg2,
@@ -698,10 +723,6 @@ export default function SettingsScreen({
         >
           <Text style={{ color: theme.t6, fontSize: 11 }}>Radius v1.0</Text>
         </View>
-
-        {/* ============================================================
-            BOTTOM ACTIONS (Sign out + destructive resets)
-            ============================================================ */}
 
         <TouchableOpacity
           onPress={handleSignOut}
@@ -782,9 +803,6 @@ export default function SettingsScreen({
   );
 }
 
-// ============================================================
-// Section label (small uppercase header above each group)
-// ============================================================
 function SectionLabel({ theme, text, danger }) {
   return (
     <Text
@@ -804,9 +822,6 @@ function SectionLabel({ theme, text, danger }) {
   );
 }
 
-// ============================================================
-// Coming-soon stub row (greyed out, no chevron, no tap)
-// ============================================================
 function ComingSoonRow({ theme, icon, title, subtitle }) {
   return (
     <View
@@ -847,7 +862,13 @@ function ComingSoonRow({ theme, icon, title, subtitle }) {
 }
 
 // ============================================================
-// Granola Integration (unchanged from prior version)
+// Granola Integration
+//
+// CHANGED: added "Find missing attendees" button. Visible when:
+//   - Pro/trial (granolaAiUnlocked)
+//   - reviewQueue contains items where the attendee is the user
+// Tapping it runs reprocessSelfOnlyItems which re-analyzes each affected
+// meeting's transcript with Claude to find the other speakers.
 // ============================================================
 function GranolaIntegration({
   myCard,
@@ -856,6 +877,7 @@ function GranolaIntegration({
   showToast,
   reviewQueue,
   onAddToReviewQueue,
+  onRemoveFromReviewQueue,
   onClearReviewQueue,
   onOpenReviewQueue,
   granolaAiUnlocked,
@@ -868,6 +890,9 @@ function GranolaIntegration({
   const [syncing, setSyncing] = useState(false);
   const [lastSync, setLastSync] = useState(null);
   const [syncStatus, setSyncStatus] = useState('');
+  // Retroactive cleanup state
+  const [reprocessing, setReprocessing] = useState(false);
+  const [reprocessStatus, setReprocessStatus] = useState('');
 
   useEffect(() => {
     (async () => {
@@ -883,6 +908,26 @@ function GranolaIntegration({
   }, []);
 
   const isConnected = !!storedKey;
+
+  // Count queue items where attendee is the user. Used to gate the
+  // "Find missing attendees" button.
+  const selfOnlyCount = React.useMemo(() => {
+    if (!Array.isArray(reviewQueue) || reviewQueue.length === 0) return 0;
+    const myEmails = new Set();
+    if (myCard?.email) myEmails.add(myCard.email.toLowerCase());
+    if (Array.isArray(myCard?.emails)) {
+      for (const e of myCard.emails) if (e?.value) myEmails.add(e.value.toLowerCase());
+    }
+    const myNames = new Set();
+    if (myCard?.name) myNames.add(myCard.name.toLowerCase().trim());
+    if (myCard?.displayName) myNames.add(myCard.displayName.toLowerCase().trim());
+
+    return reviewQueue.filter((q) => {
+      const email = (q?.attendee?.email || '').toLowerCase().trim();
+      const name = (q?.attendee?.name || '').toLowerCase().trim();
+      return (email && myEmails.has(email)) || (name && myNames.has(name));
+    }).length;
+  }, [reviewQueue, myCard]);
 
   async function testAndSave() {
     const key = apiKey.trim();
@@ -957,6 +1002,43 @@ function GranolaIntegration({
     }
 
     setSyncing(false);
+  }
+
+  // Run retroactive cleanup on self-only items.
+  async function findMissingAttendees() {
+    if (!storedKey) return;
+    if (!granolaAiUnlocked) return;
+    if (selfOnlyCount === 0) return;
+
+    confirmAction(
+      'Find missing attendees',
+      `This will use AI to re-read the transcripts of ${selfOnlyCount} meeting${selfOnlyCount === 1 ? '' : 's'} where only you were detected as an attendee. It will identify the other speakers and replace the self-attendee items with proper queue items.`,
+      async () => {
+        setReprocessing(true);
+        setReprocessStatus('Starting...');
+        try {
+          const result = await reprocessSelfOnlyItems({
+            apiKey: storedKey,
+            myCard,
+            contacts,
+            granolaAiUnlocked: true,
+            reviewQueue,
+            onProgress: (msg) => setReprocessStatus(msg),
+            onCommit,
+            addToReviewQueue: onAddToReviewQueue,
+            removeFromReviewQueue: onRemoveFromReviewQueue,
+          });
+          setReprocessStatus(result.summary || 'Done.');
+          showToast && showToast(result.summary, theme.ac);
+        } catch (e) {
+          console.error('reprocessSelfOnlyItems error:', e);
+          setReprocessStatus('Reprocess failed: ' + (e.message || 'Unknown error'));
+          Alert.alert('Reprocess failed', e.message || 'Unknown error');
+        }
+        setReprocessing(false);
+      },
+      'Find them',
+    );
   }
 
   function maskKey(k) {
@@ -1036,6 +1118,59 @@ function GranolaIntegration({
 
         {syncStatus ? (
           <Text style={{ color: theme.t4, fontSize: 11, lineHeight: 16 }}>{syncStatus}</Text>
+        ) : null}
+
+        {/* Find missing attendees: only when Pro and there are self-only items */}
+        {granolaAiUnlocked && selfOnlyCount > 0 ? (
+          <View
+            style={{
+              backgroundColor: theme.purp + '10',
+              borderRadius: 12,
+              padding: 12,
+              borderWidth: 1,
+              borderColor: theme.purp + '40',
+              gap: 8,
+            }}
+          >
+            <Text style={{ color: theme.t1, fontSize: 12, fontWeight: '600' }}>
+              Some meetings only show you as an attendee
+            </Text>
+            <Text style={{ color: theme.t4, fontSize: 11, lineHeight: 16 }}>
+              {selfOnlyCount} item{selfOnlyCount === 1 ? '' : 's'} in your review queue
+              {selfOnlyCount === 1 ? ' has' : ' have'} only you listed. This happens when
+              Granola records from another device. AI can re-read the transcripts to find
+              the other speakers.
+            </Text>
+            <TouchableOpacity
+              onPress={findMissingAttendees}
+              disabled={reprocessing}
+              style={{
+                paddingVertical: 10,
+                borderRadius: 10,
+                backgroundColor: theme.purp,
+                alignItems: 'center',
+                opacity: reprocessing ? 0.6 : 1,
+              }}
+            >
+              {reprocessing ? (
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                  <ActivityIndicator color="#fff" size="small" />
+                  <Text style={{ color: '#fff', fontSize: 12, fontWeight: '700' }}>
+                    Working...
+                  </Text>
+                </View>
+              ) : (
+                <Text style={{ color: '#fff', fontSize: 12, fontWeight: '700' }}>
+                  Find missing attendees
+                </Text>
+              )}
+            </TouchableOpacity>
+            {reprocessStatus ? (
+              <Text style={{ color: theme.t5, fontSize: 11, lineHeight: 15 }}>
+                {reprocessStatus}
+              </Text>
+            ) : null}
+          </View>
         ) : null}
 
         {Array.isArray(reviewQueue) && reviewQueue.length > 0 ? (
@@ -1137,9 +1272,6 @@ function GranolaIntegration({
   );
 }
 
-// ============================================================
-// Shared collapsible section
-// ============================================================
 function SettingsSection({ icon, title, subtitle, open, onPress, children }) {
   const { theme } = useTheme();
   return (
@@ -1197,9 +1329,6 @@ function DataRow({ icon, label, onPress }) {
   );
 }
 
-// ============================================================
-// Tags Manager (unchanged)
-// ============================================================
 function TagsManager({ customTags, hiddenTags, onSaveCustom, onSaveHidden }) {
   const { theme } = useTheme();
   const [openCat, setOpenCat] = useState(null);
@@ -1526,9 +1655,6 @@ function TagChip({ label, hidden, onPress, onDelete }) {
   );
 }
 
-// ============================================================
-// Interests Manager (unchanged, with confirmAction)
-// ============================================================
 function InterestsManager({ customInterests, hiddenInterests, onSaveCustom, onSaveHidden }) {
   const { theme } = useTheme();
   const [adding, setAdding] = useState(false);
@@ -1636,9 +1762,6 @@ function InterestsManager({ customInterests, hiddenInterests, onSaveCustom, onSa
   );
 }
 
-// ============================================================
-// Subscription card (unchanged, just lives under Account section now)
-// ============================================================
 function SubscriptionCard({
   theme,
   tier,

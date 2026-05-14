@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
 import {
   View,
   Text,
@@ -11,24 +11,43 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useTheme } from '../styles/theme';
 import { Avatar, BackButton } from '../components/Common';
-import { ChevronDown, ChevronRight, XIcon } from '../components/Icons';
+import { ChevronDown, ChevronRight, XIcon, ArchiveIcon } from '../components/Icons';
 import { fmtDate, isoToday } from '../utils/helpers';
-import { groupByMeeting, findContactsByFirstName } from '../utils/reviewQueue';
-import { aiExtractMeetingNote, aiSuggestContactsForAttendee, aiSummarizeMeetingForReview } from '../utils/ai';
-import { EMPTY_CONTACT } from '../constants';
+import {
+  groupByMeeting,
+  findContactsByFirstName,
+  splitQueueByTriage,
+} from '../utils/reviewQueue';
+import {
+  aiExtractMeetingNote,
+  aiSuggestContactsForAttendee,
+  aiSummarizeMeetingForReview,
+} from '../utils/ai';
 
 // ReviewQueueScreen
 //
-// Lists Granola sync items that need user triage. Items come from
-// store.reviewQueue. Each item holds the raw transcript / raw text so we
-// can run aiExtractMeetingNote on demand once the user picks a contact.
+// Layout:
+//   - Two tabs at top: "New items" | "Items to review"
+//   - Archive button right under the tabs (always visible)
+//   - Each meeting card starts COLLAPSED. Tap to expand.
 //
-// Per-item triage paths:
-//   - Confirm suggestion (when sync provided one)
-//   - Pick a different contact (search-all picker)
-//   - Same-first-name quick filter (when no suggestion)
-//   - Create a new contact pre-filled with attendee info
-//   - Dismiss as "not a contact"
+// Triage flow (no manual buttons):
+//   - Sync drops items into 'new'
+//   - User opens Review queue, expands one or more cards
+//   - When the user LEAVES the Review queue screen, every item still
+//     in 'new' that the user did NOT expand stays in 'new'
+//     (so it's there next time they open the queue), and every item
+//     that they DID expand moves to 'later' (Items to review)
+//   - Wait, the user wanted: ALL current new items move on exit.
+//     We additionally track whether the user expanded each card so we
+//     can render a visual "unviewed" indicator on the Items to review
+//     tab (accent left border) for items they never opened.
+//
+// Other actions:
+//   - X dismisses the item to archive (immediate)
+//   - Confirm contact / Create new contact removes the item (immediate)
+//
+// The "Move back to New" and "Review later" buttons are gone.
 
 export default function ReviewQueueScreen({
   reviewQueue,
@@ -42,23 +61,69 @@ export default function ReviewQueueScreen({
   showToast,
   granolaAiUnlocked,
   onShowPaywall,
+  initialTab,
 }) {
   const { theme } = useTheme();
   const insets = useSafeAreaInsets();
 
-  const [pickerOpen, setPickerOpen] = useState(null); // null | { item, scope: 'all'|'firstName' }
-  const [busyItemId, setBusyItemId] = useState(null);
-  // Tracks which items have an in-flight AI suggestion request
-  const [aiBusyItemId, setAiBusyItemId] = useState(null);
-  // Tracks which meeting (by noteId) has an in-flight summary request
-  const [summaryBusyNoteId, setSummaryBusyNoteId] = useState(null);
-  // Tracks which meetings have transcript expanded inline
-  const [transcriptOpenNoteIds, setTranscriptOpenNoteIds] = useState(() => new Set());
+  const [tab, setTab] = useState(initialTab === 'later' ? 'later' : 'new');
+  const [viewingArchive, setViewingArchive] = useState(false);
 
-  // Hide any items where the attendee is the user themselves. Catches
-  // stale items left over from before we started skipping the user by name.
-  // Pure display filter — items can still be dismissed via the X to remove
-  // them from storage permanently.
+  const [pickerOpen, setPickerOpen] = useState(null);
+  const [busyItemId, setBusyItemId] = useState(null);
+  const [aiBusyItemId, setAiBusyItemId] = useState(null);
+  const [summaryBusyNoteId, setSummaryBusyNoteId] = useState(null);
+  const [transcriptOpenNoteIds, setTranscriptOpenNoteIds] = useState(() => new Set());
+  // Per-card expand state. Defaults to collapsed for all; key is noteId.
+  const [expandedNoteIds, setExpandedNoteIds] = useState(() => new Set());
+
+  useEffect(() => {
+    if (initialTab === 'later' || initialTab === 'new') {
+      setTab(initialTab);
+    }
+  }, [initialTab]);
+
+  // ---------- Track expanded noteIds for the lifetime of this screen ----------
+  //
+  // The set of noteIds the user has ever expanded during this visit.
+  // Used to:
+  //   - Stamp viewedAt onto items when the user COLLAPSES a card
+  //     (in toggleExpanded), so the styling can immediately reflect
+  //     "reviewed" and the item sorts to the bottom.
+  //   - Auto-move expanded items from 'new' to 'later' on screen exit.
+  const expandedThisSessionRef = useRef(new Set());
+  // Keep latest reviewQueue + patcher in refs so the unmount cleanup
+  // works against current data (not the stale closure at mount time).
+  const reviewQueueRef = useRef(reviewQueue);
+  const onPatchRef = useRef(onPatchReviewQueueItem);
+  useEffect(() => {
+    reviewQueueRef.current = reviewQueue;
+  }, [reviewQueue]);
+  useEffect(() => {
+    onPatchRef.current = onPatchReviewQueueItem;
+  }, [onPatchReviewQueueItem]);
+
+  // On unmount: batch-move any 'new' items the user expanded this session
+  // over to 'later'. Untouched items stay in 'new'.
+  useEffect(() => {
+    return () => {
+      const queue = reviewQueueRef.current || [];
+      const patch = onPatchRef.current;
+      if (typeof patch !== 'function') return;
+      const expanded = expandedThisSessionRef.current;
+      for (const item of queue) {
+        const inNew = (item.triageState || 'new') === 'new';
+        const isInExpanded = item.noteId && expanded.has(item.noteId);
+        if (!inNew || !isInExpanded) continue;
+        try {
+          patch(item.id, { triageState: 'later' });
+        } catch (_) {}
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Filter out user-self items as a defense.
   const visibleQueue = useMemo(() => {
     if (!Array.isArray(reviewQueue)) return [];
     const myEmails = new Set();
@@ -76,17 +141,56 @@ export default function ReviewQueueScreen({
       const att = item?.attendee || {};
       const email = (att.email || '').toLowerCase().trim();
       const name = (att.name || '').toLowerCase().trim();
+      if (!email && !name) return true;
       if (email && myEmails.has(email)) return false;
       if (name && myNames.has(name)) return false;
       return true;
     });
   }, [reviewQueue, myCard]);
 
-  const grouped = useMemo(() => groupByMeeting(visibleQueue), [visibleQueue]);
-  const totalCount = visibleQueue.length;
+  const { newItems, laterItems, archivedItems } = useMemo(
+    () => splitQueueByTriage(visibleQueue),
+    [visibleQueue],
+  );
 
-  // Apply a chosen contact to a queue item: extract via Claude, append entry,
-  // remove from queue. Used by Confirm and the search picker.
+  const activeList = viewingArchive
+    ? archivedItems
+    : tab === 'later'
+      ? laterItems
+      : newItems;
+  const grouped = useMemo(() => groupByMeeting(activeList), [activeList]);
+
+  function toggleExpanded(noteId) {
+    const wasExpanded = expandedNoteIds.has(noteId);
+    setExpandedNoteIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(noteId)) next.delete(noteId);
+      else next.add(noteId);
+      return next;
+    });
+    // Track that this card was expanded at some point this session
+    expandedThisSessionRef.current.add(noteId);
+    // When the user OPENS a card, immediately mark its items as viewed.
+    // This drops the bold/accent styling and the NEW pill the moment
+    // the dropdown opens. The item also re-sorts to the bottom of the
+    // list (after collapse, since while expanded it stays in place).
+    if (!wasExpanded) {
+      const queue = reviewQueueRef.current || [];
+      const patch = onPatchRef.current;
+      if (typeof patch === 'function') {
+        const nowStamp = new Date().toISOString();
+        for (const item of queue) {
+          if (item.noteId !== noteId) continue;
+          if (item.viewedAt) continue;
+          try {
+            patch(item.id, { viewedAt: nowStamp });
+          } catch (_) {}
+        }
+      }
+    }
+  }
+
+  // ---------- Action: confirm a contact for a named attendee ----------
   async function applyContactToItem(item, contact) {
     if (!item || !contact || !onCommit) return;
     setBusyItemId(item.id);
@@ -95,17 +199,22 @@ export default function ReviewQueueScreen({
       const rawText = item.rawText || '';
       const transcriptText = item.rawTranscript || '';
 
+      const fallbackText =
+        (rawText || '').trim() ||
+        (transcriptText || '').trim() ||
+        ('Meeting: ' + (item.meetingTitle || 'Untitled') + ' on ' + fmtDate(date));
+
       let extracted = '';
-      try {
-        extracted = await aiExtractMeetingNote(contact, rawText, myCard);
-      } catch (e) {
-        console.warn('aiExtractMeetingNote failed:', e?.message);
-        extracted =
-          'Imported from meeting "' +
-          (item.meetingTitle || 'Untitled') +
-          '" on ' +
-          fmtDate(date) +
-          '. (AI extraction failed; transcript saved on entry.)';
+      if (granolaAiUnlocked) {
+        try {
+          extracted = await aiExtractMeetingNote(contact, rawText, myCard);
+          if (!extracted?.trim()) extracted = fallbackText;
+        } catch (e) {
+          console.warn('aiExtractMeetingNote failed:', e?.message);
+          extracted = fallbackText;
+        }
+      } else {
+        extracted = fallbackText;
       }
 
       const entry = {
@@ -120,7 +229,6 @@ export default function ReviewQueueScreen({
         entry.rawTranscript = transcriptText;
       }
 
-      // Append to the contact's convLog (avoid double-append if same source_id+contact already there)
       const updatedContacts = contacts.map((c) => {
         if (c.id !== contact.id) return c;
         const log = Array.isArray(c.convLog) ? c.convLog : [];
@@ -143,25 +251,154 @@ export default function ReviewQueueScreen({
     setPickerOpen(null);
   }
 
-  async function dismissItem(item) {
+  async function archiveItem(item) {
+    if (!item || !onPatchReviewQueueItem) return;
+    setBusyItemId(item.id);
+    try {
+      await onPatchReviewQueueItem(item.id, {
+        triageState: 'archived',
+        archivedAt: new Date().toISOString(),
+      });
+      showToast && showToast('Archived');
+    } catch (e) {
+      console.warn('archiveItem failed:', e?.message);
+    }
+    setBusyItemId(null);
+  }
+
+  async function deleteForever(item) {
+    if (!item) return;
     setBusyItemId(item.id);
     try {
       await onRemoveFromReviewQueue(item.id);
-      showToast && showToast('Dismissed');
+      showToast && showToast('Deleted permanently', theme.red);
     } catch (_) {}
     setBusyItemId(null);
   }
 
+  async function restoreFromArchive(item) {
+    if (!item || !onPatchReviewQueueItem) return;
+    setBusyItemId(item.id);
+    try {
+      await onPatchReviewQueueItem(item.id, {
+        triageState: 'new',
+        archivedAt: null,
+      });
+      showToast && showToast('Restored to New items');
+    } catch (e) {
+      console.warn('restoreFromArchive failed:', e?.message);
+    }
+    setBusyItemId(null);
+  }
+
+  async function skipAiSpeaker(item, speakerIndex) {
+    if (!item || !Array.isArray(item.aiAttendees)) return;
+    if (!onPatchReviewQueueItem) return;
+    const next = item.aiAttendees.filter((_, i) => i !== speakerIndex);
+    await onPatchReviewQueueItem(item.id, { aiAttendees: next });
+    if (next.length === 0) {
+      await onPatchReviewQueueItem(item.id, {
+        triageState: 'archived',
+        archivedAt: new Date().toISOString(),
+      });
+      showToast && showToast('No speakers left, item archived');
+    }
+  }
+
+  async function confirmAiSpeakerAsContact(item, speakerIndex, contact) {
+    if (!item || !Array.isArray(item.aiAttendees)) return;
+    if (!contact || !onCommit) return;
+    setBusyItemId(item.id);
+    try {
+      const date = item.meetingDate || isoToday();
+      const rawText = item.rawText || '';
+      const transcriptText = item.rawTranscript || '';
+
+      const fallbackText =
+        (rawText || '').trim() ||
+        (transcriptText || '').trim() ||
+        ('Meeting: ' + (item.meetingTitle || 'Untitled') + ' on ' + fmtDate(date));
+
+      let extracted = '';
+      try {
+        extracted = await aiExtractMeetingNote(contact, rawText, myCard);
+        if (!extracted?.trim()) extracted = fallbackText;
+      } catch (e) {
+        console.warn('aiExtractMeetingNote failed:', e?.message);
+        extracted = fallbackText;
+      }
+
+      const entry = {
+        id: 'granola_' + item.noteId + '_' + contact.id,
+        date,
+        text: extracted,
+        type: 'meeting',
+        source: 'granola',
+        source_id: item.noteId,
+      };
+      if (transcriptText && transcriptText.trim()) {
+        entry.rawTranscript = transcriptText;
+      }
+
+      const updatedContacts = contacts.map((c) => {
+        if (c.id !== contact.id) return c;
+        const log = Array.isArray(c.convLog) ? c.convLog : [];
+        if (log.some((e) => e.id === entry.id)) return c;
+        return {
+          ...c,
+          convLog: [entry, ...log],
+          lastContacted: date > (c.lastContacted || '') ? date : c.lastContacted,
+        };
+      });
+      onCommit(updatedContacts);
+
+      const nextAttendees = item.aiAttendees.filter((_, i) => i !== speakerIndex);
+      if (nextAttendees.length === 0) {
+        await onRemoveFromReviewQueue(item.id);
+      } else {
+        await onPatchReviewQueueItem(item.id, { aiAttendees: nextAttendees });
+      }
+      showToast && showToast('Added to ' + contact.name, theme.ac);
+    } catch (e) {
+      console.error('confirmAiSpeakerAsContact error:', e);
+      showToast && showToast('Failed to save', theme.red);
+    }
+    setBusyItemId(null);
+  }
+
+  function createNewFromAiSpeaker(item, speakerIndex) {
+    if (!item || !Array.isArray(item.aiAttendees)) return;
+    const speaker = item.aiAttendees[speakerIndex];
+    if (!speaker) return;
+
+    const handoff = {
+      ...item,
+      attendee: {
+        name: speaker.name || '',
+        email: speaker.email || '',
+      },
+      suggestion: speaker.identifyingContext
+        ? { contactId: null, reason: speaker.identifyingContext }
+        : null,
+      _aiSpeakerSource: {
+        parentItemId: item.id,
+        speakerIndex,
+      },
+    };
+
+    if (onCreateContactFromAttendee) {
+      onCreateContactFromAttendee(handoff);
+    }
+  }
+
   async function fetchAiSuggestions(item) {
     if (!item || !onPatchReviewQueueItem) return;
-    // Tier gate: free users see the paywall instead of running the call.
     if (!granolaAiUnlocked) {
       onShowPaywall && onShowPaywall('granola_ai_processing');
       return;
     }
     setAiBusyItemId(item.id);
     try {
-      // Send a transcript snippet rather than the full text to keep cost/tokens low.
       const snippet = (item.rawTranscript || item.rawText || '').slice(0, 1500);
       const suggestions = await aiSuggestContactsForAttendee({
         attendee: item.attendee,
@@ -170,7 +407,6 @@ export default function ReviewQueueScreen({
         transcriptSnippet: snippet,
         contacts,
       });
-      // Cache on the queue item so re-opening the screen doesn't re-fetch
       await onPatchReviewQueueItem(item.id, { aiSuggestions: suggestions });
       if (!suggestions || suggestions.length === 0) {
         showToast && showToast('No suggestions found', theme.warn);
@@ -188,19 +424,13 @@ export default function ReviewQueueScreen({
     }
   }
 
-  // Fetch a contact-agnostic AI summary for a meeting. Caches it on every
-  // queue item that shares the same noteId, so all attendees in that meeting
-  // can see it without re-fetching.
   async function fetchMeetingSummary(group) {
     if (!group?.noteId || !onPatchReviewQueueItem) return;
     if (summaryBusyNoteId === group.noteId) return;
-    // Tier gate
     if (!granolaAiUnlocked) {
       onShowPaywall && onShowPaywall('granola_ai_processing');
       return;
     }
-
-    // Pick a representative item to source rawText from
     const sourceItem = group.items.find((it) => it.rawText || it.rawTranscript);
     if (!sourceItem) return;
     const text = sourceItem.rawText || sourceItem.rawTranscript || '';
@@ -212,7 +442,6 @@ export default function ReviewQueueScreen({
         name: myCard?.name || '',
         company: myCard?.company || '',
       });
-      // Patch every item in this meeting with the summary
       for (const it of group.items) {
         await onPatchReviewQueueItem(it.id, { meetingSummary: summary });
       }
@@ -236,6 +465,21 @@ export default function ReviewQueueScreen({
     return (contacts || []).find((c) => c.id === id) || null;
   }
 
+  let subtitle = '';
+  if (viewingArchive) {
+    subtitle =
+      archivedItems.length === 0
+        ? 'No archived items.'
+        : `${archivedItems.length} archived item${archivedItems.length === 1 ? '' : 's'}.`;
+  } else if (activeList.length === 0) {
+    subtitle =
+      tab === 'later'
+        ? "Items you've reviewed before will show here."
+        : "You're all caught up.";
+  } else {
+    subtitle = `${activeList.length} ${activeList.length === 1 ? 'meeting' : 'meetings'} to review.`;
+  }
+
   return (
     <View style={{ flex: 1, backgroundColor: theme.bg }}>
       <ScrollView
@@ -245,8 +489,19 @@ export default function ReviewQueueScreen({
           paddingBottom: 100,
         }}
       >
-        <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
-          <BackButton onPress={onBack} />
+        <View
+          style={{
+            flexDirection: 'row',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+          }}
+        >
+          <BackButton
+            onPress={() => {
+              if (viewingArchive) setViewingArchive(false);
+              else onBack && onBack();
+            }}
+          />
         </View>
 
         <Text
@@ -259,16 +514,84 @@ export default function ReviewQueueScreen({
             fontFamily: theme.fontDisplay,
           }}
         >
-          Review queue
+          {viewingArchive ? 'Archived items' : 'Review queue'}
         </Text>
-        <Text style={{ fontSize: 12, color: theme.t5, marginBottom: 18, lineHeight: 17 }}>
-          {totalCount === 0
-            ? "You're all caught up."
-            : `${totalCount} attendee${totalCount === 1 ? '' : 's'} from recent meetings need to be matched to contacts.`}
+        <Text style={{ fontSize: 12, color: theme.t5, marginBottom: 14, lineHeight: 17 }}>
+          {subtitle}
         </Text>
 
-        {totalCount === 0 ? (
-          <EmptyState theme={theme} />
+        {!viewingArchive && (
+          <>
+            <View
+              style={{
+                flexDirection: 'row',
+                backgroundColor: theme.bg2,
+                borderWidth: 1,
+                borderColor: theme.brd,
+                borderRadius: 12,
+                padding: 4,
+                marginBottom: 10,
+              }}
+            >
+              <TabButton
+                label="New items"
+                count={newItems.length}
+                active={tab === 'new'}
+                onPress={() => setTab('new')}
+                theme={theme}
+              />
+              <TabButton
+                label="Items to review"
+                count={laterItems.length}
+                active={tab === 'later'}
+                onPress={() => setTab('later')}
+                theme={theme}
+              />
+            </View>
+
+            <TouchableOpacity
+              onPress={() => setViewingArchive(true)}
+              activeOpacity={0.7}
+              style={{
+                marginBottom: 16,
+                paddingVertical: 10,
+                paddingHorizontal: 14,
+                borderRadius: 10,
+                backgroundColor: theme.bg2,
+                borderWidth: 1,
+                borderColor: theme.brd,
+                flexDirection: 'row',
+                alignItems: 'center',
+                gap: 10,
+              }}
+            >
+              <ArchiveIcon size={14} color={theme.t4} />
+              <Text style={{ flex: 1, fontSize: 12, color: theme.t3, fontWeight: '500' }}>
+                Archive
+              </Text>
+              {archivedItems.length > 0 ? (
+                <View
+                  style={{
+                    paddingHorizontal: 7,
+                    paddingVertical: 2,
+                    borderRadius: 6,
+                    backgroundColor: theme.bg3,
+                    minWidth: 22,
+                    alignItems: 'center',
+                  }}
+                >
+                  <Text style={{ fontSize: 10, color: theme.t5, fontWeight: '700' }}>
+                    {archivedItems.length}
+                  </Text>
+                </View>
+              ) : null}
+              <ChevronRight size={14} color={theme.t5} />
+            </TouchableOpacity>
+          </>
+        )}
+
+        {activeList.length === 0 ? (
+          <EmptyState theme={theme} mode={viewingArchive ? 'archive' : tab} />
         ) : (
           grouped.map((group) => (
             <MeetingGroup
@@ -279,19 +602,53 @@ export default function ReviewQueueScreen({
               aiBusyItemId={aiBusyItemId}
               summaryBusy={summaryBusyNoteId === group.noteId}
               transcriptOpen={transcriptOpenNoteIds.has(group.noteId)}
+              expanded={expandedNoteIds.has(group.noteId)}
               theme={theme}
+              currentTab={tab}
+              viewingArchive={viewingArchive}
               getContactById={getContactById}
               granolaAiUnlocked={granolaAiUnlocked}
+              onToggleExpand={() => toggleExpanded(group.noteId)}
               onConfirm={(item, contact) => applyContactToItem(item, contact)}
               onPickDifferent={(item) => setPickerOpen({ item, scope: 'all' })}
-              onPickSameFirstName={(item) => setPickerOpen({ item, scope: 'firstName' })}
+              onPickSameFirstName={(item) =>
+                setPickerOpen({ item, scope: 'firstName' })
+              }
               onFetchAiSuggestions={fetchAiSuggestions}
               onFetchMeetingSummary={fetchMeetingSummary}
               onToggleTranscript={toggleTranscript}
               onCreateNew={handleCreateNewContact}
-              onDismiss={dismissItem}
+              onAddToExisting={(item) =>
+                setPickerOpen({ item, scope: 'all' })
+              }
+              onArchive={archiveItem}
+              onRestore={restoreFromArchive}
+              onDeleteForever={deleteForever}
+              onConfirmAiSpeaker={confirmAiSpeakerAsContact}
+              onSkipAiSpeaker={skipAiSpeaker}
+              onCreateNewFromAiSpeaker={createNewFromAiSpeaker}
             />
           ))
+        )}
+
+        {viewingArchive && (
+          <TouchableOpacity
+            onPress={() => setViewingArchive(false)}
+            activeOpacity={0.7}
+            style={{
+              marginTop: 16,
+              paddingVertical: 12,
+              alignItems: 'center',
+              borderRadius: 10,
+              backgroundColor: theme.bg2,
+              borderWidth: 1,
+              borderColor: theme.brd,
+            }}
+          >
+            <Text style={{ fontSize: 12, color: theme.ac, fontWeight: '600' }}>
+              Back to review queue
+            </Text>
+          </TouchableOpacity>
         )}
       </ScrollView>
 
@@ -307,9 +664,78 @@ export default function ReviewQueueScreen({
   );
 }
 
+// ----- Tab button -----
+
+function TabButton({ label, count, active, onPress, theme }) {
+  return (
+    <TouchableOpacity
+      onPress={onPress}
+      activeOpacity={0.7}
+      style={{
+        flex: 1,
+        paddingVertical: 9,
+        borderRadius: 9,
+        backgroundColor: active ? theme.bgAc : 'transparent',
+        borderWidth: active ? 1 : 0,
+        borderColor: active ? theme.brdAc : 'transparent',
+        flexDirection: 'row',
+        alignItems: 'center',
+        justifyContent: 'center',
+        gap: 6,
+      }}
+    >
+      <Text
+        style={{
+          fontSize: 12,
+          fontWeight: '700',
+          color: active ? theme.ac : theme.t5,
+        }}
+      >
+        {label}
+      </Text>
+      {count > 0 ? (
+        <View
+          style={{
+            paddingHorizontal: 6,
+            paddingVertical: 1,
+            borderRadius: 6,
+            minWidth: 18,
+            alignItems: 'center',
+            backgroundColor: active ? theme.ac : theme.bg3,
+          }}
+        >
+          <Text
+            style={{
+              fontSize: 10,
+              fontWeight: '700',
+              color: active ? '#fff' : theme.t5,
+            }}
+          >
+            {count}
+          </Text>
+        </View>
+      ) : null}
+    </TouchableOpacity>
+  );
+}
+
 // ----- Empty state -----
 
-function EmptyState({ theme }) {
+function EmptyState({ theme, mode }) {
+  const icon = mode === 'archive' ? '🗄' : mode === 'later' ? '🗂' : '✓';
+  const title =
+    mode === 'archive'
+      ? 'Archive is empty'
+      : mode === 'later'
+        ? 'Nothing here yet'
+        : 'Nothing to review';
+  const subtitle =
+    mode === 'archive'
+      ? 'Items you archive will show here. You can restore or delete them permanently.'
+      : mode === 'later'
+        ? 'New items you see and leave open will move here on your next visit.'
+        : "Sync your Granola meetings and any attendees that can't be matched automatically will show up here.";
+
   return (
     <View
       style={{
@@ -319,18 +745,18 @@ function EmptyState({ theme }) {
         alignItems: 'center',
       }}
     >
-      <Text style={{ fontSize: 30, marginBottom: 8 }}>✓</Text>
+      <Text style={{ fontSize: 30, marginBottom: 8 }}>{icon}</Text>
       <Text style={{ fontSize: 14, color: theme.t2, fontWeight: '600', marginBottom: 4 }}>
-        Nothing to review
+        {title}
       </Text>
       <Text style={{ fontSize: 12, color: theme.t5, textAlign: 'center', lineHeight: 17 }}>
-        Sync your Granola meetings and any attendees that can't be matched automatically will show up here.
+        {subtitle}
       </Text>
     </View>
   );
 }
 
-// ----- One meeting card with all its pending attendees -----
+// ----- One meeting card (collapsible) -----
 
 function MeetingGroup({
   group,
@@ -339,9 +765,13 @@ function MeetingGroup({
   aiBusyItemId,
   summaryBusy,
   transcriptOpen,
+  expanded,
   theme,
+  currentTab,
+  viewingArchive,
   getContactById,
   granolaAiUnlocked,
+  onToggleExpand,
   onConfirm,
   onPickDifferent,
   onPickSameFirstName,
@@ -349,15 +779,47 @@ function MeetingGroup({
   onFetchMeetingSummary,
   onToggleTranscript,
   onCreateNew,
-  onDismiss,
+  onAddToExisting,
+  onArchive,
+  onRestore,
+  onDeleteForever,
+  onConfirmAiSpeaker,
+  onSkipAiSpeaker,
+  onCreateNewFromAiSpeaker,
 }) {
-  // The AI summary lives on every queue item that shares the noteId. Pull it
-  // from the first item that has one. Same for the raw transcript.
-  const meetingSummary = group.items.find((i) => i.meetingSummary)?.meetingSummary || '';
+  const meetingSummary =
+    group.items.find((i) => i.meetingSummary)?.meetingSummary || '';
   const transcriptText =
     group.items.find((i) => i.rawTranscript)?.rawTranscript ||
     group.items.find((i) => i.rawText)?.rawText ||
     '';
+
+  const noNameCount = group.items.filter(
+    (it) => !(it.attendee?.name || '').trim() && !(it.attendee?.email || '').trim(),
+  ).length;
+  const namedCount = group.items.length - noNameCount;
+  const headerSummaryParts = [];
+  if (namedCount > 0) {
+    headerSummaryParts.push(
+      `${namedCount} attendee${namedCount === 1 ? '' : 's'}`,
+    );
+  }
+  if (noNameCount > 0) {
+    headerSummaryParts.push('No attendee name');
+  }
+  const headerSummary = headerSummaryParts.join(' / ');
+
+  // "Unviewed" indicator: shown on both New and Items to review tabs
+  // (not in archive). A card counts as unviewed when:
+  //   - none of its items have a stored viewedAt yet (never opened in
+  //     a past session), AND
+  //   - the card is not currently expanded in this session.
+  // As soon as the user expands the card, the styling drops immediately
+  // for instant feedback; the viewedAt timestamp gets written on screen
+  // unmount.
+  const hasAnyViewed = group.items.some((it) => it.viewedAt);
+  const showUnviewedIndicator =
+    !viewingArchive && !hasAnyViewed && !expanded;
 
   return (
     <View
@@ -365,69 +827,140 @@ function MeetingGroup({
         backgroundColor: theme.bg2,
         borderRadius: 14,
         borderWidth: 1,
-        borderColor: theme.brd,
-        padding: 14,
-        marginBottom: 12,
+        borderColor: showUnviewedIndicator ? theme.ac : theme.brd,
+        marginBottom: 10,
+        overflow: 'hidden',
+        // Accent-colored left border bar when unviewed, otherwise normal
+        ...(showUnviewedIndicator
+          ? { borderLeftWidth: 4, borderLeftColor: theme.ac }
+          : {}),
       }}
     >
-      <View style={{ marginBottom: 10 }}>
-        <Text
+      <TouchableOpacity
+        onPress={onToggleExpand}
+        activeOpacity={0.7}
+        style={{
+          flexDirection: 'row',
+          alignItems: 'center',
+          gap: 10,
+          padding: 14,
+        }}
+      >
+        <View style={{ flex: 1 }}>
+          <View
+            style={{
+              flexDirection: 'row',
+              alignItems: 'center',
+              gap: 8,
+              marginBottom: 2,
+            }}
+          >
+            <Text
+              style={{
+                fontSize: 10,
+                fontWeight: '700',
+                color: theme.ac,
+                letterSpacing: 0.5,
+                textTransform: 'uppercase',
+              }}
+            >
+              {group.meetingDate ? fmtDate(group.meetingDate) : 'No date'}
+            </Text>
+            {showUnviewedIndicator ? (
+              <View
+                style={{
+                  paddingHorizontal: 6,
+                  paddingVertical: 1,
+                  borderRadius: 4,
+                  backgroundColor: theme.bgAc,
+                  borderWidth: 1,
+                  borderColor: theme.brdAc,
+                }}
+              >
+                <Text
+                  style={{
+                    fontSize: 9,
+                    color: theme.ac,
+                    fontWeight: '700',
+                    letterSpacing: 0.4,
+                  }}
+                >
+                  NEW
+                </Text>
+              </View>
+            ) : null}
+          </View>
+          <Text
+            style={{ fontSize: 14, color: theme.t1, fontWeight: '600' }}
+            numberOfLines={2}
+          >
+            {group.meetingTitle}
+          </Text>
+          {headerSummary ? (
+            <Text style={{ fontSize: 11, color: theme.t5, marginTop: 3 }}>
+              {headerSummary}
+            </Text>
+          ) : null}
+        </View>
+        <View style={{ transform: [{ rotate: expanded ? '180deg' : '0deg' }] }}>
+          <ChevronDown size={16} color={theme.t5} />
+        </View>
+      </TouchableOpacity>
+
+      {expanded ? (
+        <View
           style={{
-            fontSize: 10,
-            fontWeight: '700',
-            color: theme.ac,
-            letterSpacing: 0.5,
-            textTransform: 'uppercase',
-            marginBottom: 2,
+            paddingHorizontal: 14,
+            paddingBottom: 14,
+            borderTopWidth: 1,
+            borderTopColor: theme.brd,
           }}
         >
-          {group.meetingDate ? fmtDate(group.meetingDate) : 'No date'}
-        </Text>
-        <Text
-          style={{ fontSize: 14, color: theme.t1, fontWeight: '600' }}
-          numberOfLines={2}
-        >
-          {group.meetingTitle}
-        </Text>
-      </View>
+          <View style={{ marginTop: 12 }}>
+            <MeetingContext
+              theme={theme}
+              meetingSummary={meetingSummary}
+              transcriptText={transcriptText}
+              transcriptOpen={transcriptOpen}
+              summaryBusy={summaryBusy}
+              granolaAiUnlocked={granolaAiUnlocked}
+              onFetchSummary={() => onFetchMeetingSummary(group)}
+              onToggleTranscript={() => onToggleTranscript(group.noteId)}
+            />
+          </View>
 
-      {/* Meeting context: summary + transcript toggle */}
-      <MeetingContext
-        theme={theme}
-        meetingSummary={meetingSummary}
-        transcriptText={transcriptText}
-        transcriptOpen={transcriptOpen}
-        summaryBusy={summaryBusy}
-        granolaAiUnlocked={granolaAiUnlocked}
-        onFetchSummary={() => onFetchMeetingSummary(group)}
-        onToggleTranscript={() => onToggleTranscript(group.noteId)}
-      />
-
-      {group.items.map((item, idx) => (
-        <QueueItemRow
-          key={item.id}
-          item={item}
-          contacts={contacts}
-          isLast={idx === group.items.length - 1}
-          busy={busyItemId === item.id}
-          aiBusy={aiBusyItemId === item.id}
-          theme={theme}
-          getContactById={getContactById}
-          granolaAiUnlocked={granolaAiUnlocked}
-          onConfirm={onConfirm}
-          onPickDifferent={onPickDifferent}
-          onPickSameFirstName={onPickSameFirstName}
-          onFetchAiSuggestions={onFetchAiSuggestions}
-          onCreateNew={onCreateNew}
-          onDismiss={onDismiss}
-        />
-      ))}
+          {group.items.map((item, idx) => (
+            <QueueItemRow
+              key={item.id}
+              item={item}
+              contacts={contacts}
+              isLast={idx === group.items.length - 1}
+              busy={busyItemId === item.id}
+              aiBusy={aiBusyItemId === item.id}
+              theme={theme}
+              viewingArchive={viewingArchive}
+              getContactById={getContactById}
+              granolaAiUnlocked={granolaAiUnlocked}
+              onConfirm={onConfirm}
+              onPickDifferent={onPickDifferent}
+              onPickSameFirstName={onPickSameFirstName}
+              onFetchAiSuggestions={onFetchAiSuggestions}
+              onCreateNew={onCreateNew}
+              onAddToExisting={onAddToExisting}
+              onArchive={onArchive}
+              onRestore={onRestore}
+              onDeleteForever={onDeleteForever}
+              onConfirmAiSpeaker={onConfirmAiSpeaker}
+              onSkipAiSpeaker={onSkipAiSpeaker}
+              onCreateNewFromAiSpeaker={onCreateNewFromAiSpeaker}
+            />
+          ))}
+        </View>
+      ) : null}
     </View>
   );
 }
 
-// Shows the meeting-level context: AI summary (when fetched) + transcript
-// toggle. Both help the user decide which contact each attendee maps to.
 function MeetingContext({
   theme,
   meetingSummary,
@@ -451,7 +984,6 @@ function MeetingContext({
         borderColor: theme.brd,
       }}
     >
-      {/* Summary section */}
       {meetingSummary ? (
         <View style={{ marginBottom: hasTranscript ? 8 : 0 }}>
           <Text
@@ -471,7 +1003,14 @@ function MeetingContext({
           </Text>
         </View>
       ) : (
-        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+        <View
+          style={{
+            flexDirection: 'row',
+            alignItems: 'center',
+            gap: 8,
+            flexWrap: 'wrap',
+          }}
+        >
           <TouchableOpacity
             onPress={onFetchSummary}
             disabled={summaryBusy}
@@ -514,14 +1053,15 @@ function MeetingContext({
                   marginLeft: 2,
                 }}
               >
-                <Text style={{ fontSize: 9, color: theme.warn, fontWeight: '700' }}>PRO</Text>
+                <Text style={{ fontSize: 9, color: theme.warn, fontWeight: '700' }}>
+                  PRO
+                </Text>
               </View>
             ) : null}
           </TouchableOpacity>
         </View>
       )}
 
-      {/* Transcript toggle row */}
       {hasTranscript ? (
         <View style={{ marginTop: meetingSummary ? 0 : 8 }}>
           <TouchableOpacity
@@ -529,7 +1069,11 @@ function MeetingContext({
             activeOpacity={0.7}
             style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}
           >
-            <View style={{ transform: [{ rotate: transcriptOpen ? '180deg' : '0deg' }] }}>
+            <View
+              style={{
+                transform: [{ rotate: transcriptOpen ? '180deg' : '0deg' }],
+              }}
+            >
               <ChevronDown size={11} color={theme.t5} />
             </View>
             <Text style={{ fontSize: 11, color: theme.t5, fontWeight: '600' }}>
@@ -568,7 +1112,7 @@ function MeetingContext({
   );
 }
 
-// ----- One pending attendee within a meeting card -----
+// ----- One queue item row -----
 
 function QueueItemRow({
   item,
@@ -577,6 +1121,7 @@ function QueueItemRow({
   busy,
   aiBusy,
   theme,
+  viewingArchive,
   getContactById,
   granolaAiUnlocked,
   onConfirm,
@@ -584,8 +1129,204 @@ function QueueItemRow({
   onPickSameFirstName,
   onFetchAiSuggestions,
   onCreateNew,
-  onDismiss,
+  onAddToExisting,
+  onArchive,
+  onRestore,
+  onDeleteForever,
+  onConfirmAiSpeaker,
+  onSkipAiSpeaker,
+  onCreateNewFromAiSpeaker,
 }) {
+  const attendeeName = (item?.attendee?.name || '').trim();
+  const attendeeEmail = (item?.attendee?.email || '').trim();
+  const isNoNamePlaceholder = !attendeeName && !attendeeEmail;
+  const hasAiAttendees =
+    Array.isArray(item.aiAttendees) && item.aiAttendees.length > 0;
+
+  // Archive view
+  if (viewingArchive) {
+    return (
+      <View
+        style={{
+          paddingTop: 10,
+          paddingBottom: isLast ? 0 : 10,
+          borderTopWidth: 1,
+          borderTopColor: theme.brd,
+        }}
+      >
+        <View style={{ flex: 1, marginRight: 8 }}>
+          <Text style={{ fontSize: 13, color: theme.t1, fontWeight: '600' }}>
+            {isNoNamePlaceholder
+              ? '(No attendee name from Granola)'
+              : attendeeName || '(no name)'}
+          </Text>
+          {attendeeEmail ? (
+            <Text style={{ fontSize: 11, color: theme.t5, marginTop: 1 }}>
+              {attendeeEmail}
+            </Text>
+          ) : null}
+        </View>
+
+        {busy ? (
+          <View
+            style={{
+              flexDirection: 'row',
+              alignItems: 'center',
+              gap: 8,
+              marginTop: 10,
+            }}
+          >
+            <ActivityIndicator color={theme.ac} size="small" />
+            <Text style={{ fontSize: 12, color: theme.t5 }}>Working...</Text>
+          </View>
+        ) : (
+          <View style={{ flexDirection: 'row', gap: 6, marginTop: 10, flexWrap: 'wrap' }}>
+            <ActionBtn
+              label="Restore"
+              primary
+              theme={theme}
+              onPress={() => onRestore(item)}
+            />
+            <ActionBtn
+              label="Delete forever"
+              theme={theme}
+              danger
+              onPress={() => onDeleteForever(item)}
+            />
+          </View>
+        )}
+      </View>
+    );
+  }
+
+  // NO-NAME PLACEHOLDER
+  if (isNoNamePlaceholder) {
+    return (
+      <View
+        style={{
+          paddingTop: 10,
+          paddingBottom: isLast ? 0 : 10,
+          borderTopWidth: 1,
+          borderTopColor: theme.brd,
+        }}
+      >
+        <View
+          style={{
+            flexDirection: 'row',
+            alignItems: 'flex-start',
+            justifyContent: 'space-between',
+          }}
+        >
+          <View
+            style={{
+              flex: 1,
+              marginRight: 8,
+              flexDirection: 'row',
+              alignItems: 'center',
+              gap: 6,
+              flexWrap: 'wrap',
+            }}
+          >
+            <View
+              style={{
+                paddingHorizontal: 8,
+                paddingVertical: 3,
+                borderRadius: 6,
+                backgroundColor: theme.warn + '22',
+                borderWidth: 1,
+                borderColor: theme.warn + '50',
+              }}
+            >
+              <Text
+                style={{
+                  fontSize: 10,
+                  color: theme.warn,
+                  fontWeight: '700',
+                  letterSpacing: 0.4,
+                }}
+              >
+                NO ATTENDEE NAME
+              </Text>
+            </View>
+            <Text style={{ fontSize: 11, color: theme.t5, flex: 1 }}>
+              Granola only returned you on this meeting.
+            </Text>
+          </View>
+          <TouchableOpacity
+            onPress={() => onArchive(item)}
+            disabled={busy}
+            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+            style={{ padding: 2 }}
+          >
+            <XIcon size={14} color={theme.t6} />
+          </TouchableOpacity>
+        </View>
+
+        {busy ? (
+          <View
+            style={{
+              flexDirection: 'row',
+              alignItems: 'center',
+              gap: 8,
+              marginTop: 10,
+            }}
+          >
+            <ActivityIndicator color={theme.ac} size="small" />
+            <Text style={{ fontSize: 12, color: theme.t5 }}>Working...</Text>
+          </View>
+        ) : hasAiAttendees ? (
+          <View style={{ marginTop: 10, gap: 8 }}>
+            <Text
+              style={{
+                fontSize: 9,
+                fontWeight: '700',
+                color: theme.purp,
+                letterSpacing: 0.5,
+                textTransform: 'uppercase',
+                marginBottom: 2,
+              }}
+            >
+              AI identified these speakers
+            </Text>
+            {item.aiAttendees.map((speaker, idx) => (
+              <AiSpeakerRow
+                key={(speaker.email || speaker.name || 'speaker') + '_' + idx}
+                speaker={speaker}
+                contacts={contacts}
+                theme={theme}
+                onAddAsNew={() => onCreateNewFromAiSpeaker(item, idx)}
+                onConfirmExisting={(contact) =>
+                  onConfirmAiSpeaker(item, idx, contact)
+                }
+                onSkip={() => onSkipAiSpeaker(item, idx)}
+              />
+            ))}
+          </View>
+        ) : (
+          <View style={{ marginTop: 10, gap: 8 }}>
+            <View style={{ flexDirection: 'row', gap: 6, flexWrap: 'wrap' }}>
+              <ActionBtn
+                label="Create new"
+                primary
+                theme={theme}
+                onPress={() => onCreateNew(item)}
+              />
+              <ActionBtn
+                label="Add to existing"
+                theme={theme}
+                onPress={() => onAddToExisting(item)}
+              />
+            </View>
+            <Text style={{ fontSize: 10, color: theme.t6, lineHeight: 15 }}>
+              View the transcript above to identify who this meeting was with.
+            </Text>
+          </View>
+        )}
+      </View>
+    );
+  }
+
+  // NAMED ATTENDEE
   const suggestedContact = item.suggestion?.contactId
     ? getContactById(item.suggestion.contactId)
     : null;
@@ -594,8 +1335,6 @@ function QueueItemRow({
     [item.attendee?.name, contacts],
   );
 
-  // AI suggestions cached on the item by the parent screen.
-  // null = never fetched, [] = fetched but empty, [...] = have results
   const aiSuggestions = item.aiSuggestions;
   const hasAiResults = Array.isArray(aiSuggestions) && aiSuggestions.length > 0;
   const fetchedButEmpty = Array.isArray(aiSuggestions) && aiSuggestions.length === 0;
@@ -609,20 +1348,25 @@ function QueueItemRow({
         borderTopColor: theme.brd,
       }}
     >
-      {/* Attendee header */}
-      <View style={{ flexDirection: 'row', alignItems: 'flex-start', justifyContent: 'space-between' }}>
+      <View
+        style={{
+          flexDirection: 'row',
+          alignItems: 'flex-start',
+          justifyContent: 'space-between',
+        }}
+      >
         <View style={{ flex: 1, marginRight: 8 }}>
           <Text style={{ fontSize: 13, color: theme.t1, fontWeight: '600' }}>
-            {item.attendee?.name || '(no name)'}
+            {attendeeName || '(no name)'}
           </Text>
-          {item.attendee?.email ? (
+          {attendeeEmail ? (
             <Text style={{ fontSize: 11, color: theme.t5, marginTop: 1 }}>
-              {item.attendee.email}
+              {attendeeEmail}
             </Text>
           ) : null}
         </View>
         <TouchableOpacity
-          onPress={() => onDismiss(item)}
+          onPress={() => onArchive(item)}
           disabled={busy}
           hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
           style={{ padding: 2 }}
@@ -632,17 +1376,28 @@ function QueueItemRow({
       </View>
 
       {busy ? (
-        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 10 }}>
+        <View
+          style={{
+            flexDirection: 'row',
+            alignItems: 'center',
+            gap: 8,
+            marginTop: 10,
+          }}
+        >
           <ActivityIndicator color={theme.ac} size="small" />
           <Text style={{ fontSize: 12, color: theme.t5 }}>Working...</Text>
         </View>
       ) : (
         <>
-          {/* Suggestion (if any) */}
           {suggestedContact ? (
             <View style={{ marginTop: 10 }}>
               <Text
-                style={{ fontSize: 10, color: theme.t5, marginBottom: 6, fontStyle: 'italic' }}
+                style={{
+                  fontSize: 10,
+                  color: theme.t5,
+                  marginBottom: 6,
+                  fontStyle: 'italic',
+                }}
               >
                 {item.suggestion?.reason || 'Suggested'}: {suggestedContact.name}
               </Text>
@@ -666,9 +1421,7 @@ function QueueItemRow({
               </View>
             </View>
           ) : (
-            // No sync-time suggestion. Show on-demand options + AI fallback.
             <View style={{ marginTop: 10 }}>
-              {/* AI suggestion results */}
               {hasAiResults ? (
                 <View style={{ marginBottom: 10 }}>
                   <Text
@@ -713,7 +1466,6 @@ function QueueItemRow({
                 </Text>
               ) : null}
 
-              {/* Action buttons */}
               <View style={{ flexDirection: 'row', gap: 6, flexWrap: 'wrap' }}>
                 {sameFirstName.length > 0 ? (
                   <ActionBtn
@@ -728,7 +1480,6 @@ function QueueItemRow({
                   />
                 ) : null}
 
-                {/* AI suggestion button: only show if we haven't fetched yet */}
                 {aiSuggestions === undefined ? (
                   <ActionBtn
                     label={
@@ -764,7 +1515,184 @@ function QueueItemRow({
   );
 }
 
-// One AI-suggested contact card. Tapping it confirms the match.
+// ----- AI-found speaker sub-row (legacy backward compat) -----
+
+function AiSpeakerRow({
+  speaker,
+  contacts,
+  theme,
+  onAddAsNew,
+  onConfirmExisting,
+  onSkip,
+}) {
+  const matches = useMemo(() => {
+    const out = [];
+    const seen = new Set();
+    const email = (speaker?.email || '').toLowerCase().trim();
+    const fullName = (speaker?.name || '').trim().toLowerCase();
+    const firstName = fullName.split(/\s+/)[0];
+
+    for (const c of contacts || []) {
+      if (c.archived) continue;
+      const cEmail = (c.email || '').toLowerCase().trim();
+      const cName = (c.name || '').toLowerCase().trim();
+      const cFirst = cName.split(/\s+/)[0];
+
+      let matchScore = 0;
+      if (email && cEmail && cEmail === email) matchScore = 3;
+      else if (fullName && cName && cName === fullName) matchScore = 2;
+      else if (firstName && cFirst && cFirst === firstName && firstName.length >= 3)
+        matchScore = 1;
+
+      if (matchScore > 0 && !seen.has(c.id)) {
+        seen.add(c.id);
+        out.push({ contact: c, score: matchScore });
+      }
+    }
+    out.sort((a, b) => b.score - a.score);
+    return out.slice(0, 3);
+  }, [speaker, contacts]);
+
+  return (
+    <View
+      style={{
+        padding: 10,
+        borderRadius: 10,
+        borderWidth: 1,
+        borderColor: theme.purp + '40',
+        backgroundColor: theme.purp + '08',
+      }}
+    >
+      <View
+        style={{
+          flexDirection: 'row',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          marginBottom: 6,
+        }}
+      >
+        <View style={{ flex: 1, marginRight: 8 }}>
+          <Text style={{ fontSize: 13, color: theme.t1, fontWeight: '600' }}>
+            {speaker.name || '(unnamed speaker)'}
+          </Text>
+          {speaker.email ? (
+            <Text style={{ fontSize: 11, color: theme.t5, marginTop: 1 }}>
+              {speaker.email}
+            </Text>
+          ) : null}
+        </View>
+        <TouchableOpacity
+          onPress={onSkip}
+          hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+          style={{ padding: 2 }}
+        >
+          <XIcon size={12} color={theme.t6} />
+        </TouchableOpacity>
+      </View>
+
+      {speaker.identifyingContext ? (
+        <Text
+          style={{
+            fontSize: 11,
+            color: theme.t4,
+            lineHeight: 15,
+            marginBottom: 8,
+            fontStyle: 'italic',
+          }}
+        >
+          {speaker.identifyingContext}
+        </Text>
+      ) : null}
+
+      {matches.length > 0 ? (
+        <View style={{ gap: 6 }}>
+          <Text
+            style={{
+              fontSize: 10,
+              color: theme.t5,
+              fontWeight: '600',
+              marginBottom: 2,
+            }}
+          >
+            Possible existing contact match:
+          </Text>
+          {matches.map(({ contact, score }) => (
+            <TouchableOpacity
+              key={contact.id}
+              onPress={() => onConfirmExisting(contact)}
+              activeOpacity={0.7}
+              style={{
+                flexDirection: 'row',
+                alignItems: 'center',
+                gap: 8,
+                padding: 8,
+                borderRadius: 8,
+                backgroundColor: theme.bg2,
+                borderWidth: 1,
+                borderColor: theme.brd,
+              }}
+            >
+              <Avatar contact={contact} size={28} />
+              <View style={{ flex: 1 }}>
+                <Text style={{ fontSize: 12, color: theme.t1, fontWeight: '500' }}>
+                  Update {contact.name}?
+                </Text>
+                {(contact.role || contact.company) ? (
+                  <Text style={{ fontSize: 10, color: theme.t5 }} numberOfLines={1}>
+                    {contact.role}
+                    {contact.role && contact.company ? ' / ' : ''}
+                    {contact.company}
+                  </Text>
+                ) : null}
+              </View>
+              <View
+                style={{
+                  paddingHorizontal: 6,
+                  paddingVertical: 2,
+                  borderRadius: 4,
+                  backgroundColor:
+                    score === 3
+                      ? '#5BC97A' + '22'
+                      : score === 2
+                        ? theme.ac + '22'
+                        : theme.warn + '22',
+                }}
+              >
+                <Text
+                  style={{
+                    fontSize: 9,
+                    fontWeight: '700',
+                    color:
+                      score === 3
+                        ? '#5BC97A'
+                        : score === 2
+                          ? theme.ac
+                          : theme.warn,
+                  }}
+                >
+                  {score === 3 ? 'EMAIL' : score === 2 ? 'NAME' : 'FIRST'}
+                </Text>
+              </View>
+            </TouchableOpacity>
+          ))}
+          <ActionBtn
+            label={'Add ' + (speaker.name || 'as new') + ' as new contact'}
+            theme={theme}
+            onPress={onAddAsNew}
+          />
+        </View>
+      ) : (
+        <ActionBtn
+          label={'Add ' + (speaker.name || 'as new') + ' as new contact'}
+          primary
+          theme={theme}
+          onPress={onAddAsNew}
+        />
+      )}
+    </View>
+  );
+}
+
 function AiSuggestionCard({ contact, confidence, reason, theme, onPress }) {
   const conf = confidence || 'low';
   const confColor =
@@ -824,7 +1752,7 @@ function AiSuggestionCard({ contact, confidence, reason, theme, onPress }) {
   );
 }
 
-function ActionBtn({ label, onPress, primary, purple, disabled, theme }) {
+function ActionBtn({ label, onPress, primary, purple, warn, danger, disabled, theme }) {
   let borderColor = theme.brd2;
   let bgColor = theme.bg3;
   let textColor = theme.t3;
@@ -837,6 +1765,14 @@ function ActionBtn({ label, onPress, primary, purple, disabled, theme }) {
     borderColor = theme.purp + '60';
     bgColor = theme.purp + '15';
     textColor = theme.purp;
+  } else if (warn) {
+    borderColor = theme.warn + '60';
+    bgColor = theme.warn + '15';
+    textColor = theme.warn;
+  } else if (danger) {
+    borderColor = theme.brdRed;
+    bgColor = theme.bgRed;
+    textColor = theme.red;
   }
 
   return (
@@ -867,11 +1803,6 @@ function ActionBtn({ label, onPress, primary, purple, disabled, theme }) {
   );
 }
 
-// ----- Contact picker modal -----
-//
-// Used for both "Different contact" (scope: all) and the same-first-name
-// quick path (scope: firstName, pre-filtered).
-
 function ContactPickerModal({ state, onClose, contacts, onPick }) {
   const { theme } = useTheme();
   const [search, setSearch] = useState('');
@@ -892,7 +1823,9 @@ function ContactPickerModal({ state, onClose, contacts, onPick }) {
     const q = search.trim().toLowerCase();
     if (!q) return baseList;
     return baseList.filter((c) => {
-      const hay = (c.name + ' ' + (c.company || '') + ' ' + (c.email || '')).toLowerCase();
+      const hay = (
+        c.name + ' ' + (c.company || '') + ' ' + (c.email || '')
+      ).toLowerCase();
       return hay.includes(q);
     });
   }, [baseList, search]);
@@ -901,6 +1834,12 @@ function ContactPickerModal({ state, onClose, contacts, onPick }) {
     setSearch('');
     onClose();
   }
+
+  const titleText =
+    scope === 'firstName' ? 'Same first name' : 'Pick a contact';
+  const subtitleText = item?.attendee?.name
+    ? `Match for ${item.attendee.name}${item.attendee.email ? ' (' + item.attendee.email + ')' : ''}`
+    : 'Pick the contact this meeting was with.';
 
   return (
     <Modal
@@ -943,19 +1882,23 @@ function ContactPickerModal({ state, onClose, contacts, onPick }) {
                 marginBottom: 8,
               }}
             >
-              <Text style={{ fontSize: 16, color: theme.t1, fontWeight: '600', fontFamily: theme.fontDisplay }}>
-                {scope === 'firstName' ? 'Same first name' : 'Pick a contact'}
+              <Text
+                style={{
+                  fontSize: 16,
+                  color: theme.t1,
+                  fontWeight: '600',
+                  fontFamily: theme.fontDisplay,
+                }}
+              >
+                {titleText}
               </Text>
               <TouchableOpacity onPress={handleClose}>
                 <XIcon size={18} color={theme.t4} />
               </TouchableOpacity>
             </View>
-            {item?.attendee?.name ? (
-              <Text style={{ fontSize: 11, color: theme.t5, marginBottom: 10 }}>
-                Match for {item.attendee.name}
-                {item.attendee.email ? ' (' + item.attendee.email + ')' : ''}
-              </Text>
-            ) : null}
+            <Text style={{ fontSize: 11, color: theme.t5, marginBottom: 10 }}>
+              {subtitleText}
+            </Text>
             {scope === 'all' ? (
               <TextInput
                 value={search}
@@ -977,7 +1920,10 @@ function ContactPickerModal({ state, onClose, contacts, onPick }) {
             ) : null}
           </View>
 
-          <ScrollView style={{ flexShrink: 1 }} contentContainerStyle={{ padding: 18, paddingTop: 4 }}>
+          <ScrollView
+            style={{ flexShrink: 1 }}
+            contentContainerStyle={{ padding: 18, paddingTop: 4 }}
+          >
             {filtered.length === 0 ? (
               <Text
                 style={{
@@ -1013,7 +1959,7 @@ function ContactPickerModal({ state, onClose, contacts, onPick }) {
                     <Text style={{ fontSize: 13, color: theme.t1, fontWeight: '500' }}>
                       {c.name}
                     </Text>
-                    {(c.company || c.role) ? (
+                    {c.company || c.role ? (
                       <Text style={{ fontSize: 11, color: theme.t5 }} numberOfLines={1}>
                         {c.role}
                         {c.role && c.company ? ' / ' : ''}
