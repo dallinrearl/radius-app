@@ -45,7 +45,7 @@ import MailingListDetailScreen from './src/screens/MailingListDetailScreen';
 import ReviewQueueScreen from './src/screens/ReviewQueueScreen';
 
 import { addDays, isoToday } from './src/utils/helpers';
-import { EMPTY_CONTACT } from './src/constants';
+import { EMPTY_CONTACT, getDisplayName, splitLegacyName } from './src/constants';
 
 import { InstrumentSerif_400Regular } from '@expo-google-fonts/instrument-serif';
 import {
@@ -96,7 +96,7 @@ function buildMailingListCsv(list, contactsOnList) {
     }
     const idx = typeof overrides[c.id] === 'number' ? overrides[c.id] : 0;
     const addr = addresses[idx] || addresses[0];
-    const recipient = (c.recipientName && c.recipientName.trim()) || c.name || '';
+    const recipient = (c.recipientName && c.recipientName.trim()) || getDisplayName(c) || '';
     rows.push(
       csvRow([
         recipient,
@@ -134,14 +134,9 @@ function AppInner() {
   const [user, setUser] = useState(null);
   const [authChecked, setAuthChecked] = useState(false);
   const [selectedListId, setSelectedListId] = useState(null);
-  // Holds the queue item being processed by createContactFromAttendee.
-  // After the user saves the contact, we use this to attach the transcript
-  // as a log entry AND remove the queue item / speaker.
   const [pendingAttendeeItem, setPendingAttendeeItem] = useState(null);
   const [extractingForAttendee, setExtractingForAttendee] = useState(false);
-  // "Have AI fill in details?" modal state. Shown to Pro users right before
-  // we open the contact form for a Granola-sourced creation.
-  const [aiFillPrompt, setAiFillPrompt] = useState(null); // null | { item }
+  const [aiFillPrompt, setAiFillPrompt] = useState(null);
 
   useEffect(() => {
     if (store.loaded && store.pin) {
@@ -313,12 +308,16 @@ function AppInner() {
       next = store.contacts.map((c) => (c.id === updated.id ? updated : c));
     } else {
       if (!skipDupeCheck) {
-        const dupe = store.contacts.find(
-          (c) =>
-            !c.archived &&
-            ((c.name && updated.name && c.name.toLowerCase() === updated.name.toLowerCase()) ||
-              (c.email && updated.email && c.email.toLowerCase() === updated.email.toLowerCase())),
-        );
+        const updatedDisplay = getDisplayName(updated).toLowerCase();
+        const updatedEmail = (updated.email || updated.emails?.[0]?.value || '').toLowerCase();
+        const dupe = store.contacts.find((c) => {
+          if (c.archived) return false;
+          const cDisplay = getDisplayName(c).toLowerCase();
+          const cEmail = (c.email || c.emails?.[0]?.value || '').toLowerCase();
+          if (cDisplay && updatedDisplay && cDisplay === updatedDisplay) return true;
+          if (cEmail && updatedEmail && cEmail === updatedEmail) return true;
+          return false;
+        });
         if (dupe) {
           setDupeWarn(dupe);
           return false;
@@ -332,48 +331,64 @@ function AppInner() {
     return true;
   }
 
-  // After save: attach the meeting transcript as a convLog entry to the
-  // new contact, and clean up the queue item (or one speaker within it).
   async function finalizeAttendeeContactIfNeeded(savedContact) {
     if (!pendingAttendeeItem) return;
     const item = pendingAttendeeItem;
     setPendingAttendeeItem(null);
 
     try {
-      const date = item.meetingDate || isoToday();
-      const text =
-        (item.rawText || '').trim() ||
-        (item.rawTranscript || '').trim() ||
-        ('Meeting: ' + (item.meetingTitle || 'Untitled') + ' on ' + date);
-      const entry = {
-        id: 'granola_' + item.noteId + '_' + savedContact.id,
-        date,
-        text,
-        type: 'meeting',
-        source: 'granola',
-        source_id: item.noteId,
-      };
-      if (item.rawTranscript && item.rawTranscript.trim()) {
-        entry.rawTranscript = item.rawTranscript;
-      }
-      const updated = store.contacts.map((c) => {
-        if (c.id !== savedContact.id) return c;
-        const log = Array.isArray(c.convLog) ? c.convLog : [];
-        if (log.some((e) => e.id === entry.id)) return c;
-        return {
-          ...c,
-          convLog: [entry, ...log],
-          lastContacted: date > (c.lastContacted || '') ? date : c.lastContacted,
-        };
-      });
-      store.commit(updated);
+      const expectedEntryId = 'granola_' + item.noteId + '_' + savedContact.id;
+      const seededEntryId = 'granola_' + item.noteId + '_pending';
+      const log = Array.isArray(savedContact.convLog) ? savedContact.convLog : [];
+      const alreadyHasEntry = log.some(
+        (e) => e.id === expectedEntryId || e.id === seededEntryId,
+      );
 
-      // Clean up the queue item.
-      //
-      // If this came from an AI-found speaker (the item has _aiSpeakerSource),
-      // remove just THAT speaker from the parent item's aiAttendees array.
-      // If it was the last speaker, remove the whole parent item.
-      // Otherwise (regular Granola item), just remove the whole item.
+      if (alreadyHasEntry) {
+        const needsPromotion = log.some((e) => e.id === seededEntryId);
+        if (needsPromotion) {
+          const updated = store.contacts.map((c) => {
+            if (c.id !== savedContact.id) return c;
+            const cLog = Array.isArray(c.convLog) ? c.convLog : [];
+            return {
+              ...c,
+              convLog: cLog.map((e) =>
+                e.id === seededEntryId ? { ...e, id: expectedEntryId } : e,
+              ),
+            };
+          });
+          store.commit(updated);
+        }
+      } else {
+        const date = item.meetingDate || isoToday();
+        const text =
+          (item.rawText || '').trim() ||
+          (item.rawTranscript || '').trim() ||
+          ('Meeting: ' + (item.meetingTitle || 'Untitled') + ' on ' + date);
+        const entry = {
+          id: expectedEntryId,
+          date,
+          text,
+          type: 'meeting',
+          source: 'granola',
+          source_id: item.noteId,
+        };
+        if (item.rawTranscript && item.rawTranscript.trim()) {
+          entry.rawTranscript = item.rawTranscript;
+        }
+        const updated = store.contacts.map((c) => {
+          if (c.id !== savedContact.id) return c;
+          const cLog = Array.isArray(c.convLog) ? c.convLog : [];
+          if (cLog.some((e) => e.id === entry.id)) return c;
+          return {
+            ...c,
+            convLog: [entry, ...cLog],
+            lastContacted: date > (c.lastContacted || '') ? date : c.lastContacted,
+          };
+        });
+        store.commit(updated);
+      }
+
       if (item._aiSpeakerSource) {
         const { parentItemId, speakerIndex } = item._aiSpeakerSource;
         const parent = (store.reviewQueue || []).find((q) => q.id === parentItemId);
@@ -441,7 +456,7 @@ function AppInner() {
 
   function archiveContact(c) {
     store.commit(store.contacts.map((x) => (x.id === c.id ? { ...x, archived: true } : x)));
-    showToast(c.name + ' archived', theme.warn);
+    showToast(getDisplayName(c) + ' archived', theme.warn);
     if (selected?.id === c.id) {
       setSelected(null);
       setView('list');
@@ -449,7 +464,7 @@ function AppInner() {
   }
   function unarchiveContact(c) {
     store.commit(store.contacts.map((x) => (x.id === c.id ? { ...x, archived: false } : x)));
-    showToast(c.name + ' restored', theme.ac);
+    showToast(getDisplayName(c) + ' restored', theme.ac);
   }
   function deleteContact(c) {
     store.commit(store.contacts.filter((x) => x.id !== c.id));
@@ -498,48 +513,56 @@ function AppInner() {
     };
     updateContact(updated);
     setLogModal({ visible: false, contact: null });
-    showToast('Logged with ' + c.name);
+    showToast('Logged with ' + getDisplayName(c));
   }
 
   function openReviewQueue() {
     setView('review_queue');
   }
 
-  // Entry point from ReviewQueueScreen's "Create new" or "Add as new" buttons.
-  //
-  // Behavior:
-  //   - Pro user with a transcript: pop the "Have AI fill in details?" modal.
-  //     Yes → run aiExtractFromVoice → form opens fully pre-filled.
-  //     No  → blank form with just name/email from the attendee.
-  //   - Free user OR no transcript: skip the modal, open name-only form.
-  //
-  // On save (handled by saveCurrentForm), the transcript is attached as a
-  // convLog entry on the new contact and the queue item is cleaned up.
   function createContactFromAttendee(item) {
     const aiUnlocked = store.featureUnlocked('granolaAiProcessing');
     const transcript = item?.rawText || item?.rawTranscript || '';
     const hasTranscript = !!transcript.trim();
 
     if (aiUnlocked && hasTranscript) {
-      // Show the prompt; user decides AI vs manual.
       setAiFillPrompt({ item });
     } else {
-      // Free user or no transcript — go straight to a blank prefilled form.
       openBlankFormFromAttendee(item);
     }
   }
 
-  // Manual path: open the form with just the attendee's name/email.
   function openBlankFormFromAttendee(item) {
     const att = item?.attendee || {};
+    const split = splitLegacyName(att.name || '');
+    const transcript = (item?.rawTranscript || '').trim() || (item?.rawText || '').trim();
+    const date = item?.meetingDate || isoToday();
+
     const prefill = {
       ...EMPTY_CONTACT,
-      name: att.name || '',
+      firstName: split.firstName,
+      lastName: split.lastName,
       email: att.email || '',
     };
     if (att.email) {
       prefill.emails = [{ label: 'Personal', value: att.email }];
     }
+    if (transcript || item?.noteId) {
+      const fallbackText =
+        'Meeting: ' + (item?.meetingTitle || 'Untitled') + ' on ' + date;
+      const entry = {
+        id: 'granola_' + item.noteId + '_pending',
+        date,
+        text: fallbackText,
+        type: 'meeting',
+        source: 'granola',
+        source_id: item.noteId,
+      };
+      if (transcript) entry.rawTranscript = transcript;
+      prefill.convLog = [entry];
+      prefill.lastContacted = date;
+    }
+
     setPendingAttendeeItem(item);
     setEditForm(prefill);
     setEditFlash(true);
@@ -547,11 +570,10 @@ function AppInner() {
     setView('edit');
   }
 
-  // AI path: run aiExtractFromVoice with myCard so the AI knows who the
-  // user is, then open the form pre-filled with everything found.
   async function openAiFilledFormFromAttendee(item) {
     const att = item?.attendee || {};
     const transcript = item?.rawText || item?.rawTranscript || '';
+    const date = item?.meetingDate || isoToday();
 
     setPendingAttendeeItem(item);
     setExtractingForAttendee(true);
@@ -561,13 +583,36 @@ function AppInner() {
       const extracted = await aiExtractFromVoice(transcript, {
         myCard: store.myCard,
         attendeeName: att.name || '',
+        summaryLength: store.meetingSummaryLength,
       });
 
-      // Merge: AI fields + ensure attendee email/name are preserved when known
+      let extractedFirst = extracted.firstName || '';
+      let extractedLast = extracted.lastName || '';
+      if (!extractedFirst && !extractedLast && typeof extracted.name === 'string') {
+        const split = splitLegacyName(extracted.name);
+        extractedFirst = split.firstName;
+        extractedLast = split.lastName;
+      }
+      if (!extractedFirst && !extractedLast && att.name) {
+        const split = splitLegacyName(att.name);
+        extractedFirst = split.firstName;
+        extractedLast = split.lastName;
+      }
+
+      const {
+        name: _droppedName,
+        notes: _droppedNotes,
+        meetingSummary: aiMeetingSummary,
+        ...extractedRest
+      } = extracted;
+
       const merged = {
         ...EMPTY_CONTACT,
-        ...extracted,
+        ...extractedRest,
+        firstName: extractedFirst,
+        lastName: extractedLast,
         email: att.email || extracted.email || '',
+        notes: '',
       };
       if (att.email) {
         const aiEmails = Array.isArray(extracted.emails) ? extracted.emails : [];
@@ -578,7 +623,23 @@ function AppInner() {
           ? aiEmails
           : [{ label: 'Personal', value: att.email }, ...aiEmails];
       }
-      if (!merged.name && att.name) merged.name = att.name;
+
+      const summaryText = (aiMeetingSummary || '').trim();
+      const fallbackText =
+        'Meeting: ' + (item?.meetingTitle || 'Untitled') + ' on ' + date;
+      const entry = {
+        id: 'granola_' + item.noteId + '_pending',
+        date,
+        text: summaryText || fallbackText,
+        type: 'meeting',
+        source: 'granola',
+        source_id: item.noteId,
+      };
+      if (transcript && transcript.trim()) {
+        entry.rawTranscript = transcript;
+      }
+      merged.convLog = [entry];
+      merged.lastContacted = date;
 
       setEditForm(merged);
       setEditFlash(true);
@@ -690,8 +751,6 @@ function AppInner() {
     return <LockScreen pin={store.pin} onUnlock={() => setLocked(false)} />;
   }
 
-  // Full-screen spinner while AI extraction runs for "Create new" from
-  // the review queue. Lasts ~3-6 seconds.
   if (extractingForAttendee) {
     return (
       <View style={{ flex: 1, backgroundColor: theme.bg, alignItems: 'center', justifyContent: 'center' }}>
@@ -730,6 +789,8 @@ function AppInner() {
           consumeAiCall={store.consumeAiCall}
           aiRemaining={store.aiRemaining}
           effectiveTier={store.effectiveTier}
+          myCard={store.myCard}
+          meetingSummaryLength={store.meetingSummaryLength}
         />
         {globalModals}
         <Toast toast={toast} />
@@ -906,7 +967,7 @@ function AppInner() {
   }
 
   if (tab === 'add') {
-    if (addMode === 'manual' || (addMode && addMode !== 'voice' && addMode !== 'card' && addMode !== 'import' && addMode !== 'receive' && addMode !== 'share' && view === 'edit')) {
+    if (addMode === 'manual' || (addMode && addMode !== 'voice' && addMode !== 'card' && addMode !== 'import' && addMode !== 'receive' && addMode !== 'share' && addMode !== 'granola' && view === 'edit')) {
       return null;
     }
     return (
@@ -921,12 +982,23 @@ function AppInner() {
               setView('edit');
               setAddMode(null);
               setTab('contacts');
+            } else if (m === 'granola') {
+              setAddMode(null);
+              setTab('settings');
+              setView('review_queue');
             } else {
               setAddMode(m);
             }
           }}
           onComplete={(prefilled) => {
-            setEditForm({ ...EMPTY_CONTACT, ...prefilled });
+            const seed = { ...EMPTY_CONTACT, ...prefilled };
+            if (!seed.firstName && !seed.lastName && typeof seed.name === 'string' && seed.name.trim()) {
+              const split = splitLegacyName(seed.name);
+              seed.firstName = split.firstName;
+              seed.lastName = split.lastName;
+            }
+            delete seed.name;
+            setEditForm(seed);
             setEditFlash(true);
             setView('edit');
             setAddMode(null);
@@ -936,6 +1008,7 @@ function AppInner() {
           myCard={store.myCard}
           onCommit={store.commit}
           showToast={showToast}
+          reviewQueue={store.reviewQueue}
           onBack={() => {
             setAddMode(null);
             setTab('contacts');
@@ -1036,6 +1109,18 @@ function AppInner() {
           hasStripeCustomer={!!store.profile?.stripe_customer_id}
           onShowPaywall={store.showPaywall}
           onSignOut={handleSignOut}
+          meetingSummaryLength={store.meetingSummaryLength}
+          onSaveMeetingSummaryLength={store.saveMeetingSummaryLength}
+          notificationsEnabled={store.notificationsEnabled}
+          notifOverdue={store.notifOverdue}
+          notifBirthdays={store.notifBirthdays}
+          hasPushToken={store.hasPushToken}
+          onSaveNotificationPrefs={store.saveNotificationPrefs}
+          onRegisterPushToken={store.registerPushToken}
+          onImportContactsPress={() => {
+            setAddMode('import');
+            setTab('add');
+          }}
         />
       )}
 
@@ -1066,10 +1151,6 @@ function AppInner() {
   );
 }
 
-// "Have AI fill in details from this conversation?" modal.
-// Shown to Pro users before opening the contact form when they're creating
-// a contact from a Granola queue item. Yes runs AI extraction on the
-// transcript; No opens a blank-prefilled form.
 function AiFillPromptModal({ visible, theme, attendeeName, onYes, onNo, onCancel }) {
   return (
     <Modal
@@ -1122,8 +1203,8 @@ function AiFillPromptModal({ visible, theme, attendeeName, onYes, onNo, onCancel
             }}
           >
             {attendeeName
-              ? `AI can read the meeting transcript and pull out everything ${attendeeName} mentioned — company, role, family, interests, deals — to pre-fill the contact card for you to review.`
-              : 'AI can read the meeting transcript and pull out everything mentioned about this contact — company, role, family, interests, deals — to pre-fill the contact card for you to review.'}
+              ? `AI can read the meeting transcript and pull out everything ${attendeeName} mentioned. Company, role, family, interests, deals. To pre-fill the contact card for you to review.`
+              : 'AI can read the meeting transcript and pull out everything mentioned about this contact. Company, role, family, interests, deals. To pre-fill the contact card for you to review.'}
           </Text>
           <View style={{ gap: 8 }}>
             <TouchableOpacity

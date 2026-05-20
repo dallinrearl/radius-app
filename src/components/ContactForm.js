@@ -20,6 +20,10 @@ import {
   emptyEmail,
   emptyAddress,
   getDisplayName,
+  TAG_GROUPS,
+  TAG_COLORS,
+  CUSTOM_TAG_COLORS,
+  getTagLabel,
 } from '../constants';
 import {
   fmtPhone,
@@ -41,10 +45,11 @@ import {
   Toggle,
   BackButton,
 } from './Common';
-import { TagSelector, InterestSelector } from './Selectors';
+import { InterestSelector } from './Selectors';
 import { CityInput, CompanyInput } from './Typeahead';
 import { DownloadIcon, XIcon } from './Icons';
 import DateInput from './DateInput';
+import ConvLog from './ConvLog';
 import * as FileSystem from 'expo-file-system';
 import * as Sharing from 'expo-sharing';
 
@@ -54,6 +59,14 @@ function moveItem(arr, from, to) {
   const [item] = next.splice(from, 1);
   next.splice(to, 0, item);
   return next;
+}
+
+function colorForTag(v) {
+  if (!v) return '#888';
+  if (TAG_COLORS[v]) return TAG_COLORS[v];
+  let h = 0;
+  for (let i = 0; i < v.length; i++) h = (h * 31 + v.charCodeAt(i)) >>> 0;
+  return CUSTOM_TAG_COLORS[h % CUSTOM_TAG_COLORS.length];
 }
 
 export default function ContactForm({
@@ -79,11 +92,9 @@ export default function ContactForm({
   const nd = nextDate(form.lastContacted, form.freq, form.freqStartedAt, form.freqDayOfWeek);
   const ndDiff = nd ? daysUntil(nd) : null;
 
-  // Local UI state for collapsing/expanding sections that should default closed.
   const [addressesExpanded, setAddressesExpanded] = useState(false);
-  // Whether the custom one-off follow-up date picker is showing. Auto-opens
-  // when the form already has a customFollowUpDate set.
   const [customDateOpen, setCustomDateOpen] = useState(false);
+  const [newTagDraft, setNewTagDraft] = useState('');
 
   // ---------- One-time form normalization on open ----------
   useEffect(() => {
@@ -91,7 +102,6 @@ export default function ContactForm({
       const next = { ...f };
       let changed = false;
 
-      // Split legacy `name` into firstName/lastName if needed.
       if (typeof next.firstName !== 'string') {
         next.firstName = '';
         changed = true;
@@ -112,7 +122,6 @@ export default function ContactForm({
         changed = true;
       }
 
-      // Rename legacy howMet -> initialIntroduction.
       if (typeof next.initialIntroduction !== 'string') {
         next.initialIntroduction = typeof next.howMet === 'string' ? next.howMet : '';
         changed = true;
@@ -121,7 +130,6 @@ export default function ContactForm({
         delete next.howMet;
         changed = true;
       }
-      // Drop removed fields if present.
       if ('howHelp' in next) {
         delete next.howHelp;
         changed = true;
@@ -141,6 +149,10 @@ export default function ContactForm({
       }
       if (typeof next.notes !== 'string') {
         next.notes = '';
+        changed = true;
+      }
+      if (!Array.isArray(next.convLog)) {
+        next.convLog = [];
         changed = true;
       }
 
@@ -174,15 +186,12 @@ export default function ContactForm({
         next.addresses = [];
         changed = true;
       }
-      // Addresses no longer auto-seed an empty one. They're hidden behind
-      // an "Add an address" button now.
 
       if (!Array.isArray(next.mailingLists)) {
         next.mailingLists = [];
         changed = true;
       }
 
-      // Migrate legacy birthday/anniversary strings to date objects.
       if (typeof next.birthday === 'string') {
         next.birthday = parseLegacyDate(next.birthday);
         changed = true;
@@ -197,8 +206,6 @@ export default function ContactForm({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [form?.id]);
 
-  // Auto-expand addresses if there are any saved on this contact, and
-  // auto-open the custom follow-up picker if a date is already set.
   useEffect(() => {
     if (Array.isArray(form.addresses) && form.addresses.length > 0) {
       setAddressesExpanded(true);
@@ -215,8 +222,85 @@ export default function ContactForm({
   const formMailingLists = Array.isArray(form.mailingLists) ? form.mailingLists : [];
   const availableLists = Array.isArray(mailingLists) ? mailingLists : [];
 
-  // Composed display name for things like vcf export and "Defaults to ..." copy.
   const displayName = getDisplayName(form);
+
+  // Lookup sets for "is this a built-in tag?". We check both values
+  // ('investor') and display labels ('Investor', 'Family Office') because
+  // `allTags` from the store may contain either depending on how it was
+  // populated. Anything that matches a built-in by value OR by label is
+  // considered built-in and stays out of the Custom section.
+  const builtInTagValues = TAG_GROUPS.flatMap((g) => g.tags.map((t) => t.v));
+  const builtInTagValuesSet = new Set(builtInTagValues);
+  const builtInTagLabelsSet = new Set(
+    TAG_GROUPS.flatMap((g) => g.tags.map((t) => t.l)),
+  );
+  function isBuiltInTag(v) {
+    if (!v) return false;
+    return builtInTagValuesSet.has(v) || builtInTagLabelsSet.has(v);
+  }
+
+  const selectedTags = Array.isArray(form.tags) ? form.tags : [];
+  const customSelectedTags = selectedTags.filter((t) => !isBuiltInTag(t));
+  const knownCustomTags = (allTags || []).filter(
+    (t) => !isBuiltInTag(t) && !customSelectedTags.includes(t),
+  );
+
+  // Which subsection groups are expanded. Default: all collapsed.
+  // Selected chips live above the groups so users can see what they
+  // picked without expanding anything.
+  const [expandedTagGroups, setExpandedTagGroups] = useState(() => ({}));
+  function toggleTagGroup(key) {
+    setExpandedTagGroups((g) => ({ ...g, [key]: !g[key] }));
+  }
+  const [customExpanded, setCustomExpanded] = useState(false);
+
+  // Per-section "has data" flags. CollapsibleSection uses these as the
+  // initial open/closed state. Basic Info is always expanded because it
+  // anchors the form and the user needs to see name/company first.
+  const hasContactLogData = Array.isArray(form.convLog) && form.convLog.length > 0;
+  const hasNotesData = !!(form.notes && form.notes.trim());
+  const hasContactInfoData =
+    (Array.isArray(form.phones) && form.phones.some((p) => p && p.value && p.value.trim())) ||
+    (Array.isArray(form.emails) && form.emails.some((e) => e && e.value && e.value.trim()));
+  const hasTagsData = Array.isArray(form.tags) && form.tags.length > 0;
+  const hasAddressesData = Array.isArray(form.addresses) && form.addresses.length > 0;
+  const hasBackgroundData =
+    !!(form.experience && form.experience.trim()) ||
+    (Array.isArray(form.pastCompanies) &&
+      form.pastCompanies.some((pc) => (pc && pc.company && pc.company.trim()) || (pc && pc.role && pc.role.trim())));
+  const hasPersonalData =
+    !!form.hometown ||
+    !!form.location ||
+    !!form.timezone ||
+    !!form.married ||
+    !!form.spouseName ||
+    (form.birthday && !dateObjectIsEmpty(form.birthday)) ||
+    (form.anniversary && !dateObjectIsEmpty(form.anniversary)) ||
+    (Array.isArray(form.kids) && form.kids.length > 0) ||
+    (Array.isArray(form.interests) && form.interests.length > 0);
+  const hasMailingListsData =
+    (Array.isArray(form.mailingLists) && form.mailingLists.length > 0) ||
+    !!(form.recipientName && form.recipientName.trim());
+
+  function toggleTag(v) {
+    setForm((f) => ({
+      ...f,
+      tags: (f.tags || []).includes(v)
+        ? (f.tags || []).filter((x) => x !== v)
+        : [...(f.tags || []), v],
+    }));
+  }
+
+  function addNewCustomTag() {
+    const v = (newTagDraft || '').trim();
+    if (!v) return;
+    setNewTagDraft('');
+    if (onAddTag) onAddTag(v);
+    setForm((f) => ({
+      ...f,
+      tags: (f.tags || []).includes(v) ? f.tags : [...(f.tags || []), v],
+    }));
+  }
 
   function updatePhones(next) {
     setForm((f) => ({
@@ -250,6 +334,20 @@ export default function ContactForm({
     setAddressesExpanded(true);
   }
 
+  // Bridge ConvLog's onUpdate (expects a full contact-shaped object back)
+  // into setForm. ConvLog calls onUpdate({ ...contact, convLog, lastContacted })
+  // so we just replace the relevant fields on the form.
+  function applyConvLogUpdate(updatedContact) {
+    setForm((f) => ({
+      ...f,
+      convLog: updatedContact.convLog || [],
+      lastContacted:
+        typeof updatedContact.lastContacted === 'string'
+          ? updatedContact.lastContacted
+          : f.lastContacted,
+    }));
+  }
+
   async function exportVcf() {
     try {
       const vcf = makeVcf(form);
@@ -264,9 +362,6 @@ export default function ContactForm({
     }
   }
 
-  // Pick a frequency option from the FREQ list. Stamps freqStartedAt the
-  // first time so the contact appears in Next Up even without prior log
-  // history. Defaults weekly to today's day of week.
   function pickFreq(v) {
     setForm((f) => {
       const next = { ...f, freq: v };
@@ -283,8 +378,6 @@ export default function ContactForm({
     });
   }
 
-  // Toggle the custom one-off follow-up date picker. When closing, clears
-  // the saved date so we don't keep a hidden value around.
   function toggleCustomDate() {
     if (customDateOpen) {
       setForm((f) => ({ ...f, customFollowUpDate: '' }));
@@ -339,8 +432,8 @@ export default function ContactForm({
           </View>
         )}
 
-        {/* Basic Info — split name, company, role, then initial intro and follow-up live here too */}
-        <Section label="Basic Info">
+        {/* Basic Info */}
+        <CollapsibleSection label="Basic Info" hasData={true}>
           <View style={{ flexDirection: 'row', gap: 8 }}>
             <View style={{ flex: 1 }}>
               <Field label="First Name">
@@ -415,7 +508,6 @@ export default function ContactForm({
                       </TouchableOpacity>
                     );
                   })}
-                  {/* Custom one-off date — sits alongside the frequency presets */}
                   <TouchableOpacity
                     onPress={toggleCustomDate}
                     style={{
@@ -439,7 +531,6 @@ export default function ContactForm({
                   </TouchableOpacity>
                 </View>
 
-                {/* Custom date picker, shown when Custom is tapped */}
                 {customDateOpen && (
                   <View style={{ marginTop: 10 }}>
                     <Text style={{ fontSize: 11, color: theme.t5, marginBottom: 6 }}>
@@ -448,7 +539,6 @@ export default function ContactForm({
                     <DateInput
                       value={parseLegacyDate(form.customFollowUpDate)}
                       onChange={(v) => {
-                        // Re-serialize the date object back to the stored string format.
                         if (!v || dateObjectIsEmpty(v)) {
                           setForm((f) => ({ ...f, customFollowUpDate: '' }));
                           return;
@@ -469,7 +559,6 @@ export default function ContactForm({
                   </View>
                 )}
 
-                {/* Day-of-week picker, shown only for weekly cadence */}
                 {form.freq === '1week' && (
                   <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 10 }}>
                     {DAYS_OF_WEEK.map((d) => {
@@ -551,11 +640,29 @@ export default function ContactForm({
               />
             </View>
           )}
-        </Section>
+        </CollapsibleSection>
 
-        {/* Notes — manual-only, sits high in the form */}
+        {/* Contact Log — manual entries + any pre-seeded entries (Granola etc.).
+            Paste-Transcript disabled here (allowImport=false) since the
+            primary route into the form's log is the Granola sync flow. */}
         {!isMyCard && (
-          <Section label="Notes">
+          <CollapsibleSection
+            label="Contact Log"
+            hasData={hasContactLogData}
+            badge={hasContactLogData ? form.convLog.length : null}
+          >
+            <ConvLog
+              contact={form}
+              onUpdate={applyConvLogUpdate}
+              allowImport={false}
+              displayName={displayName}
+            />
+          </CollapsibleSection>
+        )}
+
+        {/* Notes — manual user input only. AI never writes here. */}
+        {!isMyCard && (
+          <CollapsibleSection label="Notes" hasData={hasNotesData}>
             <Field>
               <StyledInput
                 value={form.notes || ''}
@@ -565,11 +672,11 @@ export default function ContactForm({
                 style={{ minHeight: 80 }}
               />
             </Field>
-          </Section>
+          </CollapsibleSection>
         )}
 
-        {/* Contact Info — phones and emails. LinkedIn removed. */}
-        <Section label="Contact Info">
+        {/* Contact Info */}
+        <CollapsibleSection label="Contact Info" hasData={hasContactInfoData}>
           <Field label="Phones">
             {phones.map((p, i) => (
               <PhoneRow
@@ -619,69 +726,308 @@ export default function ContactForm({
               onPress={() => updateEmails([...emails, emptyEmail()])}
             />
           </Field>
-        </Section>
+        </CollapsibleSection>
 
-        {/* Tags — directly under Contact Info per design */}
+        {/* Tags */}
         {!isMyCard && (
-          <Section label="Tags">
-            <TagSelector
-              tags={form.tags || []}
-              allTags={allTags || []}
-              onToggle={(t) =>
-                setForm((f) => ({
-                  ...f,
-                  tags: (f.tags || []).includes(t)
-                    ? f.tags.filter((x) => x !== t)
-                    : [...(f.tags || []), t],
-                }))
-              }
-              onAddTag={onAddTag}
-            />
-          </Section>
+          <CollapsibleSection
+            label="Tags"
+            hasData={hasTagsData}
+            badge={hasTagsData ? selectedTags.length : null}
+          >
+            {/* Selected — pinned chips at the top of the Tags section.
+                Tap a chip to remove. Hidden if nothing is selected. */}
+            {selectedTags.length > 0 && (
+              <View
+                style={{
+                  marginBottom: 14,
+                  paddingBottom: 12,
+                  borderBottomWidth: 1,
+                  borderBottomColor: theme.brd,
+                }}
+              >
+                <Text
+                  style={{
+                    fontSize: 10,
+                    fontWeight: '700',
+                    color: theme.ac,
+                    letterSpacing: 0.5,
+                    textTransform: 'uppercase',
+                    marginBottom: 8,
+                  }}
+                >
+                  Selected
+                </Text>
+                <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6 }}>
+                  {selectedTags.map((v) => {
+                    const c = colorForTag(v);
+                    return (
+                      <TouchableOpacity
+                        key={`sel-${v}`}
+                        onPress={() => toggleTag(v)}
+                        activeOpacity={0.7}
+                        style={{
+                          flexDirection: 'row',
+                          alignItems: 'center',
+                          gap: 6,
+                          paddingHorizontal: 12,
+                          paddingVertical: 7,
+                          borderRadius: 20,
+                          borderWidth: 1,
+                          backgroundColor: c + '22',
+                          borderColor: c,
+                        }}
+                      >
+                        <Text style={{ fontSize: 12, color: c, fontWeight: '600' }}>
+                          {getTagLabel(v)}
+                        </Text>
+                        <XIcon size={11} color={c} />
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+              </View>
+            )}
+
+            {/* Built-in group subsections. Collapsed by default. */}
+            {TAG_GROUPS.map((group, gIdx) => {
+              const open = !!expandedTagGroups[group.key];
+              const selectedInGroup = group.tags.filter((t) =>
+                selectedTags.includes(t.v),
+              ).length;
+              return (
+                <View
+                  key={group.key}
+                  style={{ marginBottom: gIdx === TAG_GROUPS.length - 1 ? 4 : 10 }}
+                >
+                  <TouchableOpacity
+                    onPress={() => toggleTagGroup(group.key)}
+                    activeOpacity={0.7}
+                    style={{
+                      flexDirection: 'row',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      paddingVertical: 6,
+                    }}
+                  >
+                    <View
+                      style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}
+                    >
+                      <Text
+                        style={{
+                          fontSize: 11,
+                          fontWeight: '700',
+                          color: theme.t4,
+                          letterSpacing: 0.5,
+                          textTransform: 'uppercase',
+                        }}
+                      >
+                        {group.label}
+                      </Text>
+                      {selectedInGroup > 0 && (
+                        <View
+                          style={{
+                            paddingHorizontal: 6,
+                            paddingVertical: 1,
+                            borderRadius: 6,
+                            backgroundColor: theme.bgAc,
+                            borderWidth: 1,
+                            borderColor: theme.brdAc,
+                          }}
+                        >
+                          <Text
+                            style={{
+                              fontSize: 9,
+                              color: theme.ac,
+                              fontWeight: '700',
+                            }}
+                          >
+                            {selectedInGroup}
+                          </Text>
+                        </View>
+                      )}
+                    </View>
+                    <Text
+                      style={{ fontSize: 11, color: theme.t5, fontWeight: '600' }}
+                    >
+                      {open ? '▾' : '▸'}
+                    </Text>
+                  </TouchableOpacity>
+                  {open && (
+                    <View
+                      style={{
+                        flexDirection: 'row',
+                        flexWrap: 'wrap',
+                        gap: 6,
+                        marginTop: 6,
+                      }}
+                    >
+                      {group.tags.map((t) => {
+                        const on = selectedTags.includes(t.v);
+                        const c = colorForTag(t.v);
+                        return (
+                          <TouchableOpacity
+                            key={t.v}
+                            onPress={() => toggleTag(t.v)}
+                            activeOpacity={0.7}
+                            style={{
+                              paddingHorizontal: 12,
+                              paddingVertical: 7,
+                              borderRadius: 20,
+                              borderWidth: 1,
+                              backgroundColor: on ? c + '22' : 'transparent',
+                              borderColor: on ? c : theme.brd2,
+                            }}
+                          >
+                            <Text
+                              style={{
+                                fontSize: 12,
+                                color: on ? c : theme.t4,
+                                fontWeight: '600',
+                              }}
+                            >
+                              {t.l}
+                            </Text>
+                          </TouchableOpacity>
+                        );
+                      })}
+                    </View>
+                  )}
+                </View>
+              );
+            })}
+
+            {/* Custom subsection. Only shows if there ARE custom tags
+                (truly custom, not display-label collisions with built-ins).
+                Collapsible like the others. */}
+            {(customSelectedTags.length > 0 || knownCustomTags.length > 0) && (
+              <View style={{ marginTop: 4, marginBottom: 10 }}>
+                <TouchableOpacity
+                  onPress={() => setCustomExpanded((v) => !v)}
+                  activeOpacity={0.7}
+                  style={{
+                    flexDirection: 'row',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    paddingVertical: 6,
+                  }}
+                >
+                  <View
+                    style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}
+                  >
+                    <Text
+                      style={{
+                        fontSize: 11,
+                        fontWeight: '700',
+                        color: theme.t4,
+                        letterSpacing: 0.5,
+                        textTransform: 'uppercase',
+                      }}
+                    >
+                      Custom
+                    </Text>
+                    {customSelectedTags.length > 0 && (
+                      <View
+                        style={{
+                          paddingHorizontal: 6,
+                          paddingVertical: 1,
+                          borderRadius: 6,
+                          backgroundColor: theme.bgAc,
+                          borderWidth: 1,
+                          borderColor: theme.brdAc,
+                        }}
+                      >
+                        <Text
+                          style={{
+                            fontSize: 9,
+                            color: theme.ac,
+                            fontWeight: '700',
+                          }}
+                        >
+                          {customSelectedTags.length}
+                        </Text>
+                      </View>
+                    )}
+                  </View>
+                  <Text
+                    style={{ fontSize: 11, color: theme.t5, fontWeight: '600' }}
+                  >
+                    {customExpanded ? '▾' : '▸'}
+                  </Text>
+                </TouchableOpacity>
+                {customExpanded && (
+                  <View
+                    style={{
+                      flexDirection: 'row',
+                      flexWrap: 'wrap',
+                      gap: 6,
+                      marginTop: 6,
+                    }}
+                  >
+                    {[...customSelectedTags, ...knownCustomTags].map((v) => {
+                      const on = selectedTags.includes(v);
+                      const c = colorForTag(v);
+                      return (
+                        <TouchableOpacity
+                          key={v}
+                          onPress={() => toggleTag(v)}
+                          activeOpacity={0.7}
+                          style={{
+                            paddingHorizontal: 12,
+                            paddingVertical: 7,
+                            borderRadius: 20,
+                            borderWidth: 1,
+                            backgroundColor: on ? c + '22' : 'transparent',
+                            borderColor: on ? c : theme.brd2,
+                          }}
+                        >
+                          <Text
+                            style={{
+                              fontSize: 12,
+                              color: on ? c : theme.t4,
+                              fontWeight: '600',
+                            }}
+                          >
+                            {getTagLabel(v)}
+                          </Text>
+                        </TouchableOpacity>
+                      );
+                    })}
+                  </View>
+                )}
+              </View>
+            )}
+
+            <View style={{ flexDirection: 'row', gap: 8, alignItems: 'center', marginTop: 6 }}>
+              <View style={{ flex: 1 }}>
+                <StyledInput
+                  value={newTagDraft}
+                  onChangeText={setNewTagDraft}
+                  placeholder="Add a custom tag..."
+                  onSubmitEditing={addNewCustomTag}
+                />
+              </View>
+              <TouchableOpacity
+                onPress={addNewCustomTag}
+                disabled={!newTagDraft.trim()}
+                style={{
+                  paddingHorizontal: 14,
+                  paddingVertical: 10,
+                  borderRadius: 10,
+                  borderWidth: 1,
+                  borderColor: theme.brdAc,
+                  backgroundColor: theme.bgAc,
+                  opacity: newTagDraft.trim() ? 1 : 0.5,
+                }}
+              >
+                <Text style={{ color: theme.ac, fontSize: 12, fontWeight: '600' }}>Add</Text>
+              </TouchableOpacity>
+            </View>
+          </CollapsibleSection>
         )}
 
-        {/* Addresses — hidden behind a button when empty, expanded when there are addresses */}
-        <Section label="Addresses">
-          {addresses.length === 0 && !addressesExpanded ? (
-            <AddRowButton
-              theme={theme}
-              label="+ Add an address"
-              onPress={addFirstAddress}
-            />
-          ) : (
-            <>
-              {addresses.map((a, i) => (
-                <AddressRow
-                  key={`addr-${i}`}
-                  theme={theme}
-                  address={a}
-                  index={i}
-                  count={addresses.length}
-                  onChange={(next) => {
-                    const arr = [...addresses];
-                    arr[i] = next;
-                    updateAddresses(arr);
-                  }}
-                  onRemove={() => {
-                    const next = addresses.filter((_, j) => j !== i);
-                    updateAddresses(next);
-                    if (next.length === 0) setAddressesExpanded(false);
-                  }}
-                  onMoveUp={() => updateAddresses(moveItem(addresses, i, i - 1))}
-                  onMoveDown={() => updateAddresses(moveItem(addresses, i, i + 1))}
-                />
-              ))}
-              <AddRowButton
-                theme={theme}
-                label="+ Add another address"
-                onPress={() => updateAddresses([...addresses, emptyAddress()])}
-              />
-            </>
-          )}
-        </Section>
-
-        {/* Background & Experience */}
-        <Section label="Background & Experience">
+        {/* Background */}
+        <CollapsibleSection label="Background & Experience" hasData={hasBackgroundData}>
           <Field label="Experience Details">
             <StyledInput
               value={form.experience || ''}
@@ -748,10 +1094,10 @@ export default function ContactForm({
               </Text>
             </TouchableOpacity>
           </Field>
-        </Section>
+        </CollapsibleSection>
 
         {/* Personal */}
-        <Section label="Personal">
+        <CollapsibleSection label="Personal" hasData={hasPersonalData}>
           <Field label="Hometown">
             <CityInput
               value={form.hometown}
@@ -912,14 +1258,54 @@ export default function ContactForm({
               onAddInterest={onAddInterest}
             />
           </Field>
-        </Section>
+        </CollapsibleSection>
 
-        {/* Mailing Lists — bottom section, includes recipient name */}
+        {/* Addresses */}
+        <CollapsibleSection label="Addresses" hasData={hasAddressesData}>
+          {addresses.length === 0 && !addressesExpanded ? (
+            <AddRowButton
+              theme={theme}
+              label="+ Add an address"
+              onPress={addFirstAddress}
+            />
+          ) : (
+            <>
+              {addresses.map((a, i) => (
+                <AddressRow
+                  key={`addr-${i}`}
+                  theme={theme}
+                  address={a}
+                  index={i}
+                  count={addresses.length}
+                  onChange={(next) => {
+                    const arr = [...addresses];
+                    arr[i] = next;
+                    updateAddresses(arr);
+                  }}
+                  onRemove={() => {
+                    const next = addresses.filter((_, j) => j !== i);
+                    updateAddresses(next);
+                    if (next.length === 0) setAddressesExpanded(false);
+                  }}
+                  onMoveUp={() => updateAddresses(moveItem(addresses, i, i - 1))}
+                  onMoveDown={() => updateAddresses(moveItem(addresses, i, i + 1))}
+                />
+              ))}
+              <AddRowButton
+                theme={theme}
+                label="+ Add another address"
+                onPress={() => updateAddresses([...addresses, emptyAddress()])}
+              />
+            </>
+          )}
+        </CollapsibleSection>
+
+        {/* Mailing Lists */}
         {!isMyCard && (
-          <Section label="Mailing Lists">
+          <CollapsibleSection label="Mailing Lists" hasData={hasMailingListsData}>
             {availableLists.length > 0 ? (
               <>
-                <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6 }}>
+                <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginBottom: 4 }}>
                   {availableLists.map((list) => {
                     const on = formMailingLists.includes(list.id);
                     return (
@@ -950,7 +1336,7 @@ export default function ContactForm({
                   })}
                 </View>
                 {addresses.length === 0 && formMailingLists.length > 0 && (
-                  <Text style={{ fontSize: 11, color: theme.warn, marginTop: 10, fontStyle: 'italic' }}>
+                  <Text style={{ fontSize: 11, color: theme.warn, marginTop: 8, fontStyle: 'italic' }}>
                     Add an address above so this contact can be exported on the mailing label.
                   </Text>
                 )}
@@ -961,14 +1347,26 @@ export default function ContactForm({
               </Text>
             )}
 
-            <Field label="Recipient Name (for mailing labels)">
+            <View style={{ marginTop: 14 }}>
+              <Text
+                style={{
+                  fontSize: 10,
+                  fontWeight: '700',
+                  color: theme.t5,
+                  letterSpacing: 0.5,
+                  textTransform: 'uppercase',
+                  marginBottom: 6,
+                }}
+              >
+                Recipient Name (for mailing labels)
+              </Text>
               <StyledInput
                 value={form.recipientName || ''}
                 onChangeText={(v) => setForm((f) => ({ ...f, recipientName: v }))}
                 placeholder={displayName ? `Defaults to "${displayName}"` : 'e.g. The Smith Family'}
               />
-            </Field>
-          </Section>
+            </View>
+          </CollapsibleSection>
         )}
 
         {/* Export */}
@@ -1033,7 +1431,6 @@ export default function ContactForm({
         )}
       </ScrollView>
 
-      {/* Bottom action bar. If onSkip is provided, render Save + Skip side by side. */}
       <View
         style={{
           position: 'absolute',
@@ -1073,7 +1470,7 @@ export default function ContactForm({
   );
 }
 
-// =================== KidRow component ===================
+// =================== KidRow ===================
 
 function KidRow({ kid, theme, onChange, onRemove }) {
   const k = kid || {};
@@ -1484,6 +1881,76 @@ function AddressRow({ theme, address, index, count, onChange, onRemove, onMoveUp
       </View>
       {isPrimary && (
         <Text style={{ fontSize: 10, color: theme.t5, marginTop: 6 }}>Primary</Text>
+      )}
+    </View>
+  );
+}
+
+// Collapsible section wrapper. Smart default: expand if `hasData` is true,
+// collapse if empty. User can toggle either way.
+function CollapsibleSection({ label, hasData, badge, children }) {
+  const { theme } = useTheme();
+  const [open, setOpen] = useState(!!hasData);
+
+  return (
+    <View
+      style={{
+        backgroundColor: theme.bg2,
+        borderRadius: 14,
+        borderWidth: 1,
+        borderColor: theme.brd,
+        marginBottom: 14,
+        overflow: 'hidden',
+      }}
+    >
+      <TouchableOpacity
+        onPress={() => setOpen((v) => !v)}
+        activeOpacity={0.7}
+        style={{
+          flexDirection: 'row',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          paddingHorizontal: 14,
+          paddingVertical: 12,
+        }}
+      >
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+          <Text
+            style={{
+              fontSize: 10,
+              fontWeight: '700',
+              color: theme.t4,
+              letterSpacing: 0.6,
+              textTransform: 'uppercase',
+            }}
+          >
+            {label}
+          </Text>
+          {badge ? (
+            <View
+              style={{
+                paddingHorizontal: 6,
+                paddingVertical: 1,
+                borderRadius: 6,
+                backgroundColor: theme.bgAc,
+                borderWidth: 1,
+                borderColor: theme.brdAc,
+              }}
+            >
+              <Text style={{ fontSize: 9, color: theme.ac, fontWeight: '700' }}>
+                {badge}
+              </Text>
+            </View>
+          ) : null}
+        </View>
+        <Text style={{ fontSize: 11, color: theme.t5, fontWeight: '600' }}>
+          {open ? '▾' : '▸'}
+        </Text>
+      </TouchableOpacity>
+      {open && (
+        <View style={{ paddingHorizontal: 14, paddingBottom: 14, paddingTop: 2 }}>
+          {children}
+        </View>
       )}
     </View>
   );

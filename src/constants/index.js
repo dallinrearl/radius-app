@@ -1,21 +1,121 @@
 // All shared constants, default data, and config
 
-export const DEFAULT_TAGS = [
-  'Investor', 'Partner', 'Lender', 'Advisor',
-  'Family Office', 'RIA', 'Colleague', 'Friend',
+// ---------- Tags ----------
+//
+// Tags are grouped into categories that render as subsections on the form.
+// Each tag has a stable `v` (value, stored on contacts) and a `l` (display
+// label). The grouping is UI-only; downstream code just sees the flat list
+// of tag values via `DEFAULT_TAGS`.
+
+export const TAG_GROUPS = [
+  {
+    key: 'personal',
+    label: 'Personal',
+    tags: [
+      { v: 'friend', l: 'Friend' },
+      { v: 'colleague', l: 'Colleague' },
+      { v: 'mentor', l: 'Mentor' },
+    ],
+  },
+  {
+    key: 'capital',
+    label: 'Capital',
+    tags: [
+      { v: 'investor', l: 'Investor' },
+      { v: 'lp', l: 'LP' },
+      { v: 'gp', l: 'GP' },
+      { v: 'family_office', l: 'Family Office' },
+      { v: 'endowment_foundation', l: 'Endowment / Foundation' },
+      { v: 'pension_fund', l: 'Pension Fund' },
+      { v: 'fund_admin', l: 'Fund Admin' },
+      { v: 'placement_agent', l: 'Placement Agent' },
+      { v: 'ria', l: 'RIA' },
+      { v: 'portfolio_company', l: 'Portfolio Company' },
+    ],
+  },
+  {
+    key: 'real_estate',
+    label: 'Real Estate',
+    tags: [
+      { v: 're_investor', l: 'RE Investor' },
+      { v: 'property_manager', l: 'Property Manager' },
+      { v: 'agent_broker', l: 'Agent / Broker' },
+      { v: 'buyer', l: 'Buyer' },
+      { v: 'seller', l: 'Seller' },
+      { v: 'lender', l: 'Lender' },
+      { v: 'inspector', l: 'Inspector' },
+      { v: 'title_escrow', l: 'Title / Escrow' },
+      { v: 'contractor', l: 'Contractor' },
+    ],
+  },
+  {
+    key: 'service_provider',
+    label: 'Service Provider',
+    tags: [
+      { v: 'client', l: 'Client' },
+      { v: 'vendor_supplier', l: 'Vendor / Supplier' },
+      { v: 'advisor', l: 'Advisor' },
+      { v: 'recruiter', l: 'Recruiter' },
+    ],
+  },
 ];
 
+// Flat list of tag values, derived from the groups. Existing code that
+// iterates `DEFAULT_TAGS` (selectors, filters, search) keeps working.
+export const DEFAULT_TAGS = TAG_GROUPS.flatMap((g) => g.tags.map((t) => t.v));
+
+// Lookup helper: tag value -> display label. Falls back to the value
+// itself for legacy tags or custom user-added tags.
+export const TAG_LABELS = TAG_GROUPS.reduce((acc, g) => {
+  for (const t of g.tags) acc[t.v] = t.l;
+  return acc;
+}, {});
+
+export function getTagLabel(v) {
+  if (!v) return '';
+  return TAG_LABELS[v] || v;
+}
+
+// Per-tag colors. Each tag gets its own color so the pills look distinct
+// even when grouped. Colors are loosely themed per group but each tag is
+// still uniquely identifiable.
 export const TAG_COLORS = {
-  Investor: '#00C9A7',
-  Partner: '#0077B6',
-  Lender: '#48B8E0',
-  Advisor: '#7B5EEA',
-  'Family Office': '#F4A261',
-  RIA: '#2196A8',
-  Colleague: '#6B7FBA',
-  Friend: '#E060A0',
+  // Personal — warm pinks / coral
+  friend: '#E060A0',
+  colleague: '#D87090',
+  mentor: '#C85890',
+
+  // Capital — greens / teals
+  investor: '#00C9A7',
+  lp: '#20B89A',
+  gp: '#40A790',
+  family_office: '#5FB48A',
+  endowment_foundation: '#7DAF7F',
+  pension_fund: '#3A9D8F',
+  fund_admin: '#2D8C7C',
+  placement_agent: '#4FB3A0',
+  ria: '#2196A8',
+  portfolio_company: '#1D7F8C',
+
+  // Real Estate — blues / earth tones
+  re_investor: '#0077B6',
+  property_manager: '#3D8FC5',
+  agent_broker: '#48B8E0',
+  buyer: '#6B7FBA',
+  seller: '#8C7DB8',
+  lender: '#5D6FAC',
+  inspector: '#7090C0',
+  title_escrow: '#5A8FB0',
+  contractor: '#A57B5F',
+
+  // Service Provider — purples / golds
+  client: '#7B5EEA',
+  vendor_supplier: '#9070D0',
+  advisor: '#B060D0',
+  recruiter: '#F4A261',
 };
 
+// Custom (user-added) tag colors. Cycled through in order.
 export const CUSTOM_TAG_COLORS = [
   '#E06090', '#40B890', '#D4A040', '#6090D0', '#B060D0',
   '#50C0C0', '#D07040', '#80B040', '#C05070', '#5080C0',
@@ -84,8 +184,6 @@ export const CITIES = [
 ];
 
 // ---------- Phone / Email / Address label presets ----------
-//
-// Defaults shown in the picker. Users can also type custom labels.
 
 export const PHONE_LABELS  = ['Cell', 'Work', 'Home', 'Other'];
 export const EMAIL_LABELS  = ['Personal', 'Work', 'Other'];
@@ -106,69 +204,39 @@ export const emptyAddress = () => ({
 });
 
 // ---------- EMPTY_CONTACT ----------
-//
-// Schema notes:
-// - `firstName` and `lastName` replace the old single `name` field. The
-//   legacy `name` is preserved on read by `migrateLegacyContact` (split on
-//   first space) but no longer lives on EMPTY_CONTACT. Use
-//   `getDisplayName(c)` everywhere that needs to render a contact label.
-// - `initialIntroduction` replaces the old `howMet`. Same semantic field,
-//   clearer name. Migration auto-renames on read.
-// - Removed entirely: `topics`, `notes`-as-transcripts, `linkedin`, `howHelp`.
-//   `notes` stays as a manual-only free-text field. Transcript / meeting
-//   content lives exclusively in `convLog`.
-// - `customFollowUpDate` is a one-off override that sits alongside `freq`.
-//   When set, the UI treats it as the next scheduled follow-up regardless
-//   of frequency. Format: 'YYYY-MM-DD' or ''.
-//
-// Date fields (birthday, anniversary, customFollowUpDate) are flexible
-// strings. See `parseFlexibleDate` below.
-//   - 'YYYY-MM-DD' (full date)
-//   - 'MM-DD'      (no year, e.g. '06-15')   [birthday/anniversary only]
-//   - ''           (not set)
 
 export const EMPTY_CONTACT = {
-  // Identity
   firstName: '', lastName: '', company: '', role: '',
 
-  // Legacy single fields (kept for backward compat; migration moves them
-  // into `phones` / `emails` on read).
   phone: '',
   email: '',
 
-  // New multi-entry fields. First entry in each array is treated as the
-  // primary / default.
-  phones: [],     // [{ label, value }]
-  emails: [],     // [{ label, value }]
-  addresses: [],  // [{ label, line1, line2, city, state, zip, country }]
+  phones: [],
+  emails: [],
+  addresses: [],
 
-  // Relationship context
   initialIntroduction: '',
-  notes: '',                  // MANUAL ONLY. AI must never write here.
-  lastContacted: '',          // No longer manually editable. Derived from convLog.
+  notes: '',
+  lastContacted: '',
   tags: [],
   freq: 'never',
-  customFollowUpDate: '',     // 'YYYY-MM-DD' or ''. One-off override for next follow-up.
+  customFollowUpDate: '',
   priority: false,
 
-  // Personal details
-  birthday: '',     // flexible: 'YYYY-MM-DD' or 'MM-DD'
+  birthday: '',
   timezone: '', location: '',
   hometown: '',
-  married: null,    // null | 'married' | 'single' | etc.
+  married: null,
   spouseName: '',
-  anniversary: '',  // flexible: 'YYYY-MM-DD' or 'MM-DD'
+  anniversary: '',
   kids: [],
   interests: [],
 
-  // Career
   experience: '', pastCompanies: [],
 
-  // Mailing list / cards
-  recipientName: '',  // override for mailing labels; falls back to display name
-  mailingLists: [],   // array of mailing list ids the contact belongs to
+  recipientName: '',
+  mailingLists: [],
 
-  // System
   photo: '',
   convLog: [],
   archived: false,
@@ -177,9 +245,6 @@ export const EMPTY_CONTACT = {
 };
 
 // ---------- Display name helper ----------
-//
-// Always use this to render a contact's name. Handles the legacy `name`
-// field on contacts that haven't been touched by the migration yet.
 
 export function getDisplayName(c) {
   if (!c || typeof c !== 'object') return '';
@@ -190,8 +255,6 @@ export function getDisplayName(c) {
   return '';
 }
 
-// Split a legacy single-name string into first/last on the first space.
-// Single-word names become first name only.
 export function splitLegacyName(s) {
   if (!s || typeof s !== 'string') return { firstName: '', lastName: '' };
   const trimmed = s.trim();
@@ -240,9 +303,6 @@ function isValidMonthDay(month, day) {
   return true;
 }
 
-// Format a flexible date for display. Returns '' if not parseable.
-//   '1990-06-15' -> 'Jun 15, 1990'
-//   '06-15'      -> 'Jun 15'
 export function formatFlexibleDate(s) {
   const parts = parseFlexibleDate(s);
   if (!parts) return '';
@@ -252,11 +312,6 @@ export function formatFlexibleDate(s) {
   return `${monthName} ${parts.day}`;
 }
 
-// Convert separate MM/DD/YYYY string inputs into the flexible date format.
-// Year is optional. Returns '' if month or day is missing/invalid.
-//   ('06', '15', '1990') -> '1990-06-15'
-//   ('06', '15', '')     -> '06-15'
-//   ('6', '5', '')       -> '06-05'
 export function partsToFlexibleDate(mm, dd, yyyy) {
   const month = parseInt(mm, 10);
   const day = parseInt(dd, 10);
@@ -270,11 +325,6 @@ export function partsToFlexibleDate(mm, dd, yyyy) {
   return `${mmStr}-${ddStr}`;
 }
 
-// Reverse of partsToFlexibleDate. Splits a stored date back into the three
-// pieces the UI binds to. Empty strings for missing pieces.
-//   '1990-06-15' -> { mm: '06', dd: '15', yyyy: '1990' }
-//   '06-15'      -> { mm: '06', dd: '15', yyyy: '' }
-//   ''           -> { mm: '',   dd: '',   yyyy: '' }
 export function flexibleDateToParts(s) {
   const parts = parseFlexibleDate(s);
   if (!parts) return { mm: '', dd: '', yyyy: '' };
@@ -286,16 +336,12 @@ export function flexibleDateToParts(s) {
 }
 
 // ---------- Migration helper ----------
-//
-// Takes a contact in any historical shape and returns it in the current
-// shape. Idempotent — safe to call on already-migrated contacts.
 
 export function migrateLegacyContact(c) {
   if (!c || typeof c !== 'object') return c;
 
   const out = { ...c };
 
-  // Name: split legacy `name` into firstName/lastName.
   if (typeof out.firstName !== 'string') out.firstName = '';
   if (typeof out.lastName !== 'string') out.lastName = '';
   if (!out.firstName && !out.lastName && typeof out.name === 'string' && out.name.trim()) {
@@ -303,28 +349,19 @@ export function migrateLegacyContact(c) {
     out.firstName = split.firstName;
     out.lastName = split.lastName;
   }
-  // Keep `name` in the object for now so older display code doesn't break
-  // mid-migration. Anything writing contacts should stop setting `name`.
-  // It can be dropped entirely once the Supabase column migration ships.
 
-  // initialIntroduction <- howMet
   if (typeof out.initialIntroduction !== 'string') {
     out.initialIntroduction = typeof out.howMet === 'string' ? out.howMet : '';
   }
   delete out.howMet;
 
-  // Remove fields we no longer support.
   delete out.howHelp;
   delete out.linkedin;
   delete out.topics;
 
-  // Notes: ensure it's a string (manual-only field).
   if (typeof out.notes !== 'string') out.notes = '';
-
-  // customFollowUpDate (new field).
   if (typeof out.customFollowUpDate !== 'string') out.customFollowUpDate = '';
 
-  // Phones/emails/addresses arrays.
   if (!Array.isArray(out.phones)) out.phones = [];
   if (out.phones.length === 0 && typeof out.phone === 'string' && out.phone.trim()) {
     out.phones = [{ label: 'Cell', value: out.phone.trim() }];
@@ -395,7 +432,6 @@ export function getSampleContacts(addDays, isoToday) {
   const sampleAddedAt = new Date().toISOString();
 
   return [
-    // ---------- Personal: close friend from college ----------
     {
       ...EMPTY_CONTACT,
       id: 'sample_maya',
@@ -423,7 +459,7 @@ export function getSampleContacts(addDays, isoToday) {
       initialIntroduction: 'College roommate. Stood up at her wedding.',
       notes: 'Allergic to shellfish. Loves audiobooks. Always brings the best wine.',
       lastContacted: addDays(t, -22),
-      tags: ['close_friend', 'college_friend'],
+      tags: ['friend'],
       freq: '1month',
       customFollowUpDate: '',
       priority: false,
@@ -449,7 +485,7 @@ export function getSampleContacts(addDays, isoToday) {
       convLog: [{
         id: 'sample_maya_log_1',
         date: addDays(t, -22),
-        text: "Caught up over coffee. She's deep into a new pottery class and her dad just retired — he's planning a long trip to India.",
+        text: "Caught up over coffee. She's deep into a new pottery class and her dad just retired. He's planning a long trip to India.",
         type: 'meeting',
       }],
       archived: false,
@@ -457,7 +493,6 @@ export function getSampleContacts(addDays, isoToday) {
       sampleAddedAt,
     },
 
-    // ---------- Professional: mentor / advisor ----------
     {
       ...EMPTY_CONTACT,
       id: 'sample_marcus',

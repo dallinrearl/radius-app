@@ -25,7 +25,7 @@ async function callClaude({ system, prompt, max_tokens = 800 }) {
 
 // Structured output path. Pass a tool schema; Claude is forced to return
 // data matching the schema. The structured `input` is returned directly,
-// already parsed — no JSON.parse, no markdown stripping, no fallbacks.
+// already parsed.
 async function callClaudeWithTool({ system, prompt, tool, max_tokens = 800 }) {
   const { data, error } = await supabase.functions.invoke('claude', {
     body: {
@@ -97,6 +97,16 @@ function humanGap(isoDate) {
 
 // ---------- Contact summary ----------
 
+function displayNameOf(c) {
+  if (!c) return '';
+  const composed = [c.firstName, c.lastName]
+    .filter((s) => typeof s === 'string' && s.trim())
+    .join(' ')
+    .trim();
+  if (composed) return composed;
+  return typeof c.name === 'string' ? c.name.trim() : '';
+}
+
 function summarizeContact(c) {
   if (!c) return '';
   const lines = [];
@@ -104,11 +114,16 @@ function summarizeContact(c) {
   lines.push(`Today's date: ${today}`);
   lines.push('');
 
-  lines.push(`Name: ${c.name || '(unknown)'}`);
+  const displayName = [c.firstName, c.lastName]
+    .filter((s) => typeof s === 'string' && s.trim())
+    .join(' ')
+    .trim() || c.name || '(unknown)';
+  lines.push(`Name: ${displayName}`);
   if (c.role || c.company) {
     lines.push(`Role: ${[c.role, c.company].filter(Boolean).join(' at ')}`);
   }
 
+  if (c.initialIntroduction) lines.push(`Initial introduction: ${c.initialIntroduction}`);
   if (c.howMet) lines.push(`How we met: ${c.howMet}`);
   if (c.howHelp) lines.push(`How I can help them: ${c.howHelp}`);
   if (c.tags?.length) lines.push(`Tags: ${c.tags.join(', ')}`);
@@ -172,6 +187,245 @@ function summarizeContact(c) {
   }
 
   return lines.join('\n');
+}
+
+// ---------- Meeting summary length preference ----------
+//
+// User-configurable in Settings. Drives the format and length of meeting
+// summaries produced by aiExtractFromVoice and aiExtractMeetingNote.
+
+export const SUMMARY_LENGTH_OPTIONS = {
+  detailed: {
+    key: 'detailed',
+    label: 'Detailed',
+    description: '3-8 sentence prose summary capturing every relevant detail.',
+  },
+  standard: {
+    key: 'standard',
+    label: 'Standard',
+    description: '2-4 sentence prose summary covering the key points.',
+  },
+  bullets_long: {
+    key: 'bullets_long',
+    label: 'Long bullets',
+    description: 'Up to 10 bullet points, one per key fact or moment.',
+  },
+  bullets_short: {
+    key: 'bullets_short',
+    label: 'Short bullets',
+    description: 'Up to 5 bullet points covering only the most important takeaways.',
+  },
+};
+
+export const DEFAULT_SUMMARY_LENGTH = 'detailed';
+
+function normalizeSummaryLength(value) {
+  if (typeof value === 'string' && SUMMARY_LENGTH_OPTIONS[value]) return value;
+  return DEFAULT_SUMMARY_LENGTH;
+}
+
+// Produces the format-specific instructions injected into the system
+// prompt of any function that generates a meeting summary.
+function buildSummaryLengthInstruction(length, contactNameForBullets) {
+  const lengthKey = normalizeSummaryLength(length);
+  const subject = contactNameForBullets || 'the contact';
+
+  switch (lengthKey) {
+    case 'standard':
+      return `LENGTH AND FORMAT: Prose paragraph. 2-4 sentences. Tight and ` +
+        `factual. Past tense, third person about ${subject}. No bullets. No ` +
+        `headers. Just the prose body.`;
+
+    case 'bullets_long':
+      return `LENGTH AND FORMAT: Up to 10 bullet points. Each bullet is one ` +
+        `concrete fact or moment. Format each bullet as a single line starting ` +
+        `with "- " (hyphen, space, then the bullet text). Separate bullets with ` +
+        `a newline. Past tense, third person about ${subject}. No introductory ` +
+        `paragraph. No headers. No conclusion. Just the bullets.
+
+EXAMPLE FORMAT:
+- ${subject} mentioned [specific fact]
+- ${subject} shared [specific detail]
+- ${subject} committed to [specific action]
+
+QUALITY: Each bullet must carry weight. Skip filler. If there are only 4 ` +
+        `worthwhile bullets to write, write 4. Do NOT pad to hit 10.`;
+
+    case 'bullets_short':
+      return `LENGTH AND FORMAT: Up to 5 bullet points. Only the most important ` +
+        `takeaways. Each bullet is one concrete fact or moment. Format each ` +
+        `bullet as a single line starting with "- " (hyphen, space, then text). ` +
+        `Separate bullets with a newline. Past tense, third person about ` +
+        `${subject}. No introductory paragraph. No headers. No conclusion.
+
+EXAMPLE FORMAT:
+- ${subject} mentioned [most important fact]
+- ${subject} committed to [most important action]
+
+QUALITY: Be ruthless. Top 5 only. If there are only 2 worthwhile bullets, ` +
+        `write 2. Do NOT pad to hit 5.`;
+
+    case 'detailed':
+    default:
+      return `LENGTH AND FORMAT: Prose paragraph. 3-8 sentences. Capture every ` +
+        `relevant detail: family ${subject} mentioned, deals discussed, plans ` +
+        `shared, opinions expressed, news. Past tense, third person about ` +
+        `${subject} ("${subject} mentioned...", "He said...", "She shared..."). ` +
+        `No bullets. No headers. Just the prose body.`;
+  }
+}
+
+// ---------- User identity block ----------
+
+function buildUserIdentityBlock(myCard) {
+  if (!myCard) {
+    return `IMPORTANT: The user is one of the speakers in the transcript. You ` +
+      `do NOT know their identity. Infer which speaker is the user (the ` +
+      `one running this CRM) versus the contact (the OTHER speaker) from ` +
+      `context. Never attribute the user's own first-person statements as ` +
+      `facts about the contact.`;
+  }
+
+  const userName = displayNameOf(myCard);
+  const userCompany = (myCard.company || '').trim();
+  const userRole = (myCard.role || '').trim();
+  const userLocation = (myCard.location || '').trim();
+  const userHometown = (myCard.hometown || '').trim();
+  const userSpouse = (myCard.spouseName || '').trim();
+  const userInterests = Array.isArray(myCard.interests) ? myCard.interests.filter(Boolean) : [];
+  const userKids = Array.isArray(myCard.kids)
+    ? myCard.kids.map((k) => (k?.name || '').trim()).filter(Boolean)
+    : [];
+  const userPastCompanies = Array.isArray(myCard.pastCompanies)
+    ? myCard.pastCompanies.map((p) => (p?.company || '').trim()).filter(Boolean)
+    : [];
+
+  const userFacts = [];
+  if (userName) userFacts.push(`Name: ${userName}`);
+  if (userRole) userFacts.push(`Role: ${userRole}`);
+  if (userCompany) userFacts.push(`Company: ${userCompany}`);
+  if (userPastCompanies.length) userFacts.push(`Past companies: ${userPastCompanies.join(', ')}`);
+  if (userLocation) userFacts.push(`Currently lives: ${userLocation}`);
+  if (userHometown) userFacts.push(`Hometown: ${userHometown}`);
+  if (userSpouse) userFacts.push(`Spouse: ${userSpouse}`);
+  if (userKids.length) userFacts.push(`Kids: ${userKids.join(', ')}`);
+  if (userInterests.length) userFacts.push(`Interests: ${userInterests.join(', ')}`);
+
+  return `IMPORTANT: The user (the person USING this CRM, who is one of the ` +
+    `speakers in the transcript) has the following identity. NONE of ` +
+    `these facts belong to the contact. If you see any of these mentioned ` +
+    `in the transcript, they describe the USER, not the contact.
+
+USER'S OWN IDENTITY (do NOT attach to the contact's record):
+${userFacts.map((f) => '  - ' + f).join('\n')}
+
+The contact you are extracting is the OTHER speaker(s) in the conversation. ` +
+    `When the user says "I just started at ${userCompany || '[company]'}" or "my wife and I moved to ${userLocation || '[city]'}" or "I went to BYU", those are USER facts, NEVER contact facts.`;
+}
+
+// ---------- Post-extraction scrubber ----------
+
+function normalizeForCompare(s) {
+  return (s || '').toString().trim().toLowerCase().replace(/\s+/g, ' ');
+}
+
+function scrubExtractedAgainstMyCard(extracted, myCard) {
+  if (!myCard || !extracted) return extracted;
+
+  const userCompany = normalizeForCompare(myCard.company);
+  const userRole = normalizeForCompare(myCard.role);
+  const userLocation = normalizeForCompare(myCard.location);
+  const userHometown = normalizeForCompare(myCard.hometown);
+  const userSpouse = normalizeForCompare(myCard.spouseName);
+  const userPastCompanies = new Set(
+    (Array.isArray(myCard.pastCompanies) ? myCard.pastCompanies : [])
+      .map((p) => normalizeForCompare(p?.company))
+      .filter(Boolean)
+  );
+  const userKidNames = new Set(
+    (Array.isArray(myCard.kids) ? myCard.kids : [])
+      .map((k) => normalizeForCompare(k?.name))
+      .filter(Boolean)
+  );
+  const userInterests = new Set(
+    (Array.isArray(myCard.interests) ? myCard.interests : [])
+      .map(normalizeForCompare)
+      .filter(Boolean)
+  );
+
+  const out = { ...extracted };
+  const stripped = [];
+
+  if (userCompany && normalizeForCompare(out.company) === userCompany) {
+    stripped.push(`company="${out.company}"`);
+    out.company = '';
+    if (out.role) {
+      stripped.push(`role="${out.role}" (stripped because company stripped)`);
+      out.role = '';
+    }
+  } else if (userRole && userCompany && normalizeForCompare(out.role) === userRole) {
+    if (!out.company) {
+      stripped.push(`role="${out.role}" (matches user role, no contact company)`);
+      out.role = '';
+    }
+  }
+
+  if (userLocation && normalizeForCompare(out.location) === userLocation) {
+    stripped.push(`location="${out.location}"`);
+    out.location = '';
+  }
+  if (userHometown && normalizeForCompare(out.hometown) === userHometown) {
+    stripped.push(`hometown="${out.hometown}"`);
+    out.hometown = '';
+  }
+
+  if (userSpouse && normalizeForCompare(out.spouseName) === userSpouse) {
+    stripped.push(`spouseName="${out.spouseName}"`);
+    out.spouseName = '';
+    if (out.married) {
+      stripped.push(`married="${out.married}" (stripped because spouse stripped)`);
+      out.married = '';
+    }
+  }
+
+  if (Array.isArray(out.pastCompanies) && userPastCompanies.size > 0) {
+    const filtered = out.pastCompanies.filter((p) => {
+      const c = normalizeForCompare(p?.company);
+      if (c && userPastCompanies.has(c)) {
+        stripped.push(`pastCompany="${p.company}"`);
+        return false;
+      }
+      return true;
+    });
+    out.pastCompanies = filtered;
+  }
+
+  if (Array.isArray(out.kids) && userKidNames.size > 0) {
+    const filtered = out.kids.filter((k) => {
+      const n = normalizeForCompare(k?.name);
+      if (n && userKidNames.has(n)) {
+        stripped.push(`kid="${k.name}"`);
+        return false;
+      }
+      return true;
+    });
+    out.kids = filtered;
+  }
+
+  if (Array.isArray(out.interests) && out.interests.length > 0 && userInterests.size > 0) {
+    const normalized = out.interests.map(normalizeForCompare);
+    const allMatch = normalized.every((i) => userInterests.has(i));
+    if (allMatch) {
+      stripped.push(`interests=[${out.interests.join(', ')}] (all matched user)`);
+      out.interests = [];
+    }
+  }
+
+  if (stripped.length > 0) {
+    console.warn('[ai scrubber] stripped user-leak fields:', stripped.join('; '));
+  }
+
+  return out;
 }
 
 // ---------- Shared instruction snippets ----------
@@ -401,63 +655,157 @@ export async function aiTemplate(contact, type) {
     `Write the email. Specific over generic. Short over long.`;
   return callClaude({ system, prompt, max_tokens: 500 });
 }
+// ============================================================
+// PASTE THIS FUNCTION INTO src/utils/ai.js
+// Add it right after aiTemplate (around line 657 in current file),
+// before the `// ---------- aiExtractMeetingNote ----------` comment.
+// ============================================================
 
+// ---------- aiAnswerQuestion ----------
+//
+// Multi-turn Q&A about a specific contact. Given the user's chat history
+// with Claude about this contact and a new question, returns Claude's
+// answer. The full contact record (including convLog and any saved
+// transcripts) is provided as context. Claude grounds answers in that
+// data and openly says when it doesn't know something.
+//
+// history: array of { role: 'user'|'assistant', content: string }.
+// newQuestion: the latest user question (a string).
+
+export async function aiAnswerQuestion(contact, history, newQuestion) {
+  if (!newQuestion || !newQuestion.trim()) {
+    throw new Error('No question provided');
+  }
+
+  const summary = summarizeContact(contact);
+  const contactName = displayNameOf(contact) || 'this contact';
+
+  // Pull raw transcripts off any convLog entries that have them, since
+  // the contact summary only shows the summarized text. Transcripts are
+  // the densest source of detail for Q&A.
+  const transcripts = (contact.convLog || [])
+    .filter((e) => e.rawTranscript && e.rawTranscript.trim())
+    .slice(0, 10)
+    .map((e) => {
+      const header = `--- Transcript from ${e.date}${e.type ? ' (' + e.type + ')' : ''} ---`;
+      return header + '\n' + e.rawTranscript.trim();
+    });
+
+  const transcriptBlock = transcripts.length
+    ? `\n\nRAW TRANSCRIPTS (verbatim, may contain rich details not in the summary above):\n\n${transcripts.join('\n\n')}`
+    : '';
+
+  const system =
+    `You are answering questions about a specific person (${contactName}) ` +
+    `the user knows. The user has saved details about this person in a CRM ` +
+    `and is asking you questions to recall information, find patterns, or ` +
+    `prepare for an interaction.
+
+YOUR JOB:
+- Answer the user's questions about ${contactName} accurately, grounded ` +
+    `ONLY in the contact data and transcripts provided below.
+- Be concise. The user is on mobile in a chat interface. Keep answers ` +
+    `tight unless they ask for detail.
+- If the data contains the answer, give it directly. Cite the relevant ` +
+    `conversation date when it adds clarity (e.g. "back in March he ` +
+    `mentioned...") but don't drown the answer in citations.
+- If the data does NOT contain the answer, say so plainly. Do not guess, ` +
+    `do not invent, do not fill in plausible details from general knowledge.
+- For interpretive questions ("what's he interested in", "how's the ` +
+    `relationship", "what should I talk about"), synthesize from the data ` +
+    `but make clear what's inference vs fact.
+- For factual recall ("when did we last meet", "where does she work"), ` +
+    `give just the fact.
+- Multi-turn: if the user asks a follow-up, treat the prior turns as ` +
+    `context. Don't re-explain things you already said.
+
+STYLE:
+- Conversational, not corporate. Plain prose. No headers. No bullet lists ` +
+    `unless the user explicitly asks for a list.
+- Refer to the contact by first name where natural.
+- Never start with "Based on the data..." or "According to the records...". ` +
+    `Just answer.
+
+${HONESTY_RULES}
+
+CONTACT DATA (this is everything you know about ${contactName}):
+
+${summary}${transcriptBlock}`;
+
+  // Encode the prior turns as a transcript-style block, then the new
+  // question at the end. The single-prompt callClaude doesn't take a
+  // messages array, so we serialize the chat into one string.
+  const historyLines = (Array.isArray(history) ? history : [])
+    .filter((m) => m && typeof m.content === 'string' && m.content.trim())
+    .map((m) => {
+      const tag = m.role === 'assistant' ? 'Assistant' : 'User';
+      return tag + ': ' + m.content.trim();
+    });
+
+  let prompt;
+  if (historyLines.length === 0) {
+    prompt = `User question: ${newQuestion.trim()}\n\nYour answer:`;
+  } else {
+    prompt =
+      `Prior conversation:\n\n` +
+      historyLines.join('\n\n') +
+      `\n\nUser: ${newQuestion.trim()}\n\nAssistant:`;
+  }
+
+  return callClaude({ system, prompt, max_tokens: 800 });
+}
 // ---------- aiExtractMeetingNote ----------
 //
-// Take pasted raw meeting content (Granola export, Otter transcript,
-// Zoom AI summary, generic notes, etc.) and produce a clean, focused
-// log entry from the perspective of one specific contact.
-//
-// The output is the body text of a single conversation log entry.
-// Returns a string. The caller wraps it in a convLog entry with date
-// and type.
+// summaryLength controls the format/length of the output.
+// See SUMMARY_LENGTH_OPTIONS for valid values. Defaults to 'detailed'.
 
-export async function aiExtractMeetingNote(contact, rawText, myCard) {
+export async function aiExtractMeetingNote(contact, rawText, myCard, summaryLength) {
   if (!rawText?.trim()) {
     throw new Error('No text provided');
   }
   const summary = summarizeContact(contact);
+  const contactName = displayNameOf(contact) || 'the contact';
 
-  const userName = (myCard?.name || '').trim();
+  const userIdBlock = buildUserIdentityBlock(myCard);
+  const userName = displayNameOf(myCard);
   const userCompany = (myCard?.company || '').trim();
-  const userRole = (myCard?.role || '').trim();
-  const userIdLine = userName
-    ? `The user (the person logging this note) is ${userName}` +
-      (userRole ? `, ${userRole}` : '') +
-      (userCompany ? ` at ${userCompany}` : '') + '. ' +
-      `The user is NOT the contact. Do not extract facts about the user as if ` +
-      `they were facts about the contact.`
-    : `The user is the person logging this note. They are NOT the contact. ` +
-      `Do not extract facts about the user as if they were facts about the contact.`;
 
-  const contactName = (contact?.name || '').trim() || 'the contact';
+  const lengthInstruction = buildSummaryLengthInstruction(summaryLength, contactName);
 
   const system =
     `You extract a clean, focused meeting log entry from raw meeting ` +
     `notes. The notes might come from Granola, Otter, Fireflies, Zoom ` +
     `AI Companion, an email summary, or just typed text. They might ` +
     `cover a 1-on-1 or a multi-person meeting. Your job is to capture ` +
-    `what's relevant ABOUT THE CONTACT (not the user).
+    `what's relevant ABOUT THE CONTACT (${contactName}), NOT about the user.
 
-WHO IS WHO:
-${userIdLine}
-The contact this log entry is for is ${contactName}. You are extracting ` +
-    `what ${contactName} said, did, revealed, or committed to — NOT what the ` +
-    `user said about themselves.
+${userIdBlock}
 
-INTERPRETING SPEAKERS:
-- First-person statements ("I", "my", "we" where "we" means the user's side) ` +
-    `in the transcript are the USER speaking, not the contact. Do NOT attribute ` +
+THE CONTACT THIS LOG ENTRY IS FOR:
+${contactName}. You are extracting what ${contactName} said, did, revealed, ` +
+    `or committed to. Everything in the output should be ABOUT ${contactName}.
+
+CRITICAL ATTRIBUTION RULES:
+- First-person statements ("I", "my", "we" meaning the user's side) in the ` +
+    `transcript are the USER speaking, NOT the contact. Do NOT attribute ` +
     `those facts to the contact.
+- WORKED EXAMPLE: If the transcript says "I just started a new job at ` +
+    `${userCompany || 'AcmeCo'}" and the user is the one speaking, that fact ` +
+    `belongs to the USER. Do NOT write "${contactName} started at ` +
+    `${userCompany || 'AcmeCo'}".
+- WORKED EXAMPLE: If the user says "my wife and I moved to Lehi", do NOT ` +
+    `write that the contact moved to Lehi.
+- WORKED EXAMPLE: If the contact says "congrats on the new job" and the ` +
+    `user says "thanks, I just started at X", the new job belongs to the ` +
+    `USER, not the contact, even though the contact mentioned it first.
 - When a speaker is labeled by name, match it to the right person. If the ` +
     `transcript only labels speakers as "Speaker A / Speaker B", infer from ` +
-    `context which one is ${contactName} (the one being asked about, the one ` +
-    `whose company/role/family details match the contact info above) and which ` +
-    `is the user.
+    `context which one is ${contactName} (whose company/role/family details ` +
+    `match the contact info above) and which is the user.
 - If you genuinely can't tell who said something, leave it out rather than ` +
     `guessing.
 
-WHAT TO CAPTURE (about the contact, ${contactName}):
+WHAT TO CAPTURE (about ${contactName}):
 - What ${contactName} said about their life, family, work, health, ` +
     `interests, plans, vacations, food preferences, etc.
 - What ${contactName} revealed about themselves, their company, their team, ` +
@@ -469,33 +817,29 @@ WHAT TO CAPTURE (about the contact, ${contactName}):
 
 WHAT TO LEAVE OUT:
 - Anything that is actually the USER talking about themselves, their own ` +
-    `family, their own job, their own plans. Those are not facts about the contact.
+    `family, their own job, their own plans, their own move, their own ` +
+    `company news. Those are not facts about the contact.
 - Filler, small talk, "how are you" pleasantries.
 - Stuff said by other meeting attendees (not the contact, not the user) that ` +
     `doesn't involve the contact.
-- Verbatim transcript style. Compress everything into prose.
+- Verbatim transcript style. Compress everything.
 
-STYLE:
-- Plain prose. NOT bullets. Run-on log style is fine.
-- 3-8 sentences. Tight.
-- Past tense. Third person about the contact ("${contactName} mentioned...", ` +
-    `"He said...", "She shared...").
-- Pull out specific concrete details when they exist. If they ` +
-    `mentioned their daughter starting at Brown next year, write ` +
-    `that. If they mentioned closing on a deal next month, write that.
-- Don't interpret or coach. Don't add follow-up suggestions. Just ` +
-    `record what happened.
+${lengthInstruction}
 
-NO PREAMBLE. NO HEADERS. Just the log body text.
+Don't interpret or coach. Don't add follow-up suggestions. Just record what ` +
+    `happened.
+
+NO PREAMBLE.
 
 ${HONESTY_RULES}`;
   const prompt =
     `Contact this log entry is for:\n\n${summary}\n\n` +
     `Raw meeting content:\n\n${rawText}\n\n` +
     `Extract a clean log entry focused on what ${contactName} said and ` +
-    `revealed. Remember: first-person "I" in the transcript is the user, ` +
-    `not the contact.`;
-  return callClaude({ system, prompt, max_tokens: 600 });
+    `revealed. Remember: first-person "I" in the transcript is ` +
+    `${userName || 'the user'}, NOT ${contactName}. Do not move user ` +
+    `facts onto ${contactName}'s record.`;
+  return callClaude({ system, prompt, max_tokens: 800 });
 }
 
 // ---------- aiSuggestContactsForAttendee ----------
@@ -511,7 +855,7 @@ export async function aiSuggestContactsForAttendee({ attendee, meetingTitle, mee
       : '';
     return {
       id: c.id,
-      name: c.name || '',
+      name: displayNameOf(c),
       company: c.company || '',
       role: c.role || '',
       tags: (c.tags || []).slice(0, 3),
@@ -633,7 +977,7 @@ export async function aiSummarizeMeetingForReview(rawText, userInfo = {}) {
   }
   const trimmed = trimForMeetingSummary(rawText);
 
-  const userName = (userInfo.name || '').trim();
+  const userName = displayNameOf(userInfo);
   const userCompany = (userInfo.company || '').trim();
   const userIdLine = userName
     ? `The user is ${userName}${userCompany ? ` (${userCompany})` : ''}. ` +
@@ -667,31 +1011,21 @@ ${HONESTY_RULES}`;
 
 // ---------- aiExtractFromVoice ----------
 //
-// Extract every field a user might mention in a voice transcript OR a
-// meeting transcript. Used for two paths:
-//   1. Voice memo → new contact (AddScreen voice mode)
-//   2. Granola transcript → new contact (review queue "Create new")
-//
-// When myCard is provided (Granola path), the AI is told explicitly
-// who the USER is so it can route first-person statements correctly:
-// "I have three kids" said by the user is NOT a fact about the contact.
-//
-// The schema matches the contact form's data model exactly.
+// opts.summaryLength controls the format/length of meetingSummary.
+// See SUMMARY_LENGTH_OPTIONS for valid values. Defaults to 'detailed'.
 
 const EMPTY_VOICE_RESULT = {
-  name: '',
+  firstName: '',
+  lastName: '',
   company: '',
   role: '',
   priority: false,
   phones: [],
   emails: [],
-  linkedin: '',
   addresses: [],
   recipientName: '',
-  howMet: '',
-  howHelp: '',
-  topics: '',
-  notes: '',
+  initialIntroduction: '',
+  meetingSummary: '',
   tags: [],
   experience: '',
   pastCompanies: [],
@@ -714,35 +1048,22 @@ export async function aiExtractFromVoice(transcript, opts = {}) {
 
   const myCard = opts.myCard || null;
   const attendeeHint = (opts.attendeeName || '').trim();
+  const summaryLength = normalizeSummaryLength(opts.summaryLength);
 
-  // Build a "who is who" line that goes near the top of the prompt.
-  // For the Granola path, this is critical — without it the AI treats
-  // first-person "I" statements in the transcript as facts about the
-  // contact, which puts the user's own info on the wrong card.
-  let userIdLine = '';
+  const userIdBlock = buildUserIdentityBlock(myCard);
+  const userName = displayNameOf(myCard);
+  const userCompany = (myCard?.company || '').trim();
+
+  const summarySubject = attendeeHint || 'the contact';
+  const lengthInstruction = buildSummaryLengthInstruction(summaryLength, summarySubject);
+
   let attendeeLine = '';
-  if (myCard) {
-    const userName = (myCard.name || '').trim();
-    const userCompany = (myCard.company || '').trim();
-    const userRole = (myCard.role || '').trim();
-    if (userName) {
-      userIdLine =
-        `IMPORTANT: The user (the person USING this CRM, who is one of the ` +
-        `speakers in the transcript) is ${userName}` +
-        (userRole ? `, ${userRole}` : '') +
-        (userCompany ? ` at ${userCompany}` : '') + '. ' +
-        `The user is NOT the contact you are extracting. Do NOT put the ` +
-        `user's name, company, family, kids, interests, or any other ` +
-        `details into the contact fields. The contact is the OTHER ` +
-        `speaker(s) in the conversation.`;
-    }
-  }
   if (attendeeHint) {
     attendeeLine =
       `The contact being created is named "${attendeeHint}" (this name ` +
       `came from the meeting attendee list). Use this as the contact's ` +
       `name and extract everything ELSE the transcript reveals about ` +
-      `THIS specific person.`;
+      `THIS specific person, never about the user.`;
   }
 
   const today = todayUS();
@@ -752,30 +1073,52 @@ export async function aiExtractFromVoice(transcript, opts = {}) {
   (a) a voice memo the user dictated about a person they know, OR
   (b) a meeting transcript between the user and one or more other people.
 
-${userIdLine}
+${userIdBlock}
+
 ${attendeeLine}
 
 For case (a) the user is describing the contact in third person, easy.
 For case (b) you need to figure out which speaker is the user (skip ` +
     `their info) and which is the contact (extract their info).
 
-INTERPRETING SPEAKERS IN A MEETING TRANSCRIPT:
-- First-person statements ("I", "my", "we") are the SPEAKER, not the contact.
-- If the user is one of the speakers (case b above), first-person statements ` +
-    `from the user are about the USER, NOT the contact. Do NOT extract those.
+CRITICAL ATTRIBUTION RULES, read carefully, this is the #1 source of bugs:
+- First-person statements ("I", "my", "we" meaning the user's side) in the ` +
+    `transcript are the USER speaking, NOT the contact.
+- The user's own facts (their company, role, kids, spouse, hometown, ` +
+    `location, interests, past jobs) NEVER belong on the contact's record, ` +
+    `even when the user mentions them in conversation with the contact.
+- WORKED EXAMPLE: User says "I just started at ${userCompany || 'AcmeCo'}". ` +
+    `The contact says "congrats on the new role at ${userCompany || 'AcmeCo'}". ` +
+    `Result: company="${userCompany || 'AcmeCo'}" goes on the USER, NOT the contact. ` +
+    `Do NOT extract company="${userCompany || 'AcmeCo'}" for the contact just ` +
+    `because both speakers said the words.
+- WORKED EXAMPLE: User says "my wife and I just moved to Lehi". ` +
+    `Result: Do NOT set location="Lehi" on the contact.
+- WORKED EXAMPLE: User says "I went to BYU". Contact says "oh, I went there too". ` +
+    `Result: ONLY the contact's "I went there too" is a contact fact. The contact's ` +
+    `education is BYU. The user's BYU is not the contact's.
+- If the contact NEVER personally states or confirms a fact about themselves, ` +
+    `do NOT extract it for them. Better empty than wrong.
+- Match speakers to names using context: role, company, family, location ` +
+    `details should align with the right person.
 - If a speaker says "I have two kids named X and Y" and that speaker is the ` +
     `USER, those kids belong to the user, NOT the contact.
 - If a speaker says "I have two kids named X and Y" and that speaker is the ` +
     `CONTACT, those kids DO belong to the contact.
-- Match speakers to names using context: role, company, family, location ` +
-    `details should align with the right person.
 - If you genuinely cannot tell who said what, leave the field empty rather ` +
     `than guess.
 
-WHAT TO LOOK FOR (about the contact):
+WHAT TO LOOK FOR (about the CONTACT only, never the user):
 
-Basic: name, company, role, LinkedIn handle/URL.
-Priority: priority=true ONLY if explicitly called VIP/important.
+Basic identity:
+- firstName: the contact's first/given name. Required if you know any part of their name.
+- lastName: the contact's last/family name. Empty string if not stated. Don't make one up.
+- company: the contact's CURRENT employer (NOT the user's). Only extract if the ` +
+    `contact themselves stated or confirmed where they work.
+- role: the contact's job title (NOT the user's).
+- Priority: priority=true ONLY if explicitly called VIP/important.
+
+Do NOT return a "name" field, a "linkedin" field, "howMet", "howHelp", or "topics". Those are legacy and have been removed from the schema.
 
 Contact info:
 - phones: array of {label, value}. Labels: Cell/Work/Home/Other.
@@ -784,26 +1127,26 @@ Contact info:
 - recipientName: only if specified.
 
 Context:
-- howMet: where/how the contact was met. Resolve "last week" to ${todayMinusDaysUS(7)}, ` +
-    `"yesterday" to ${todayMinusDaysUS(1)}, etc. Today is ${today}.
-- howHelp: things the user can do for this contact.
-- topics: subjects the contact cares about discussing.
+- initialIntroduction: a single short string capturing how the user met the contact, where they were introduced, what context brought them together, and (if mentioned) what they care about talking about. Combine all relationship context into this one field. Examples: "ULI conference, interested in Mountain West multifamily", "Referral from Sarah Chen, looking for LP commitments for fund III", "Cousin's wedding in 2019, works in healthcare consulting". Resolve relative dates: "last week" = ${todayMinusDaysUS(7)}, "yesterday" = ${todayMinusDaysUS(1)}, today is ${today}. Leave empty if nothing relevant.
 - tags: relationship category like Friend, Colleague, Mentor, Client, Vendor.
 
-Background:
-- experience: notable career background, education, achievements OF THE CONTACT.
-- pastCompanies: array of {company, role} for the contact's previous jobs.
+Background (the CONTACT's, never the user's):
+- experience: notable career background, education, achievements OF THE CONTACT. ` +
+    `Do NOT include the user's career background here, even if the user mentioned ` +
+    `it in the conversation.
+- pastCompanies: array of {company, role} for the CONTACT's previous jobs. ` +
+    `Do NOT include the user's past companies.
 
 Personal (ABOUT THE CONTACT, not the user):
-- hometown: where the contact grew up.
-- location: where the contact lives now.
-- timezone: ET, CT, MT, PT if stated.
-- birthday: {month, day, year}. Use null for unknown components.
-- married: "married", "single", "divorced", "widowed" — about the CONTACT.
-- spouseName: contact's spouse name.
-- anniversary: same {month, day, year} format.
-- kids: the CONTACT's kids only.
-- interests: the contact's hobbies/sports/etc.
+- hometown: where the CONTACT grew up. NOT where the user grew up.
+- location: where the CONTACT lives now. NOT where the user lives.
+- timezone: ET, CT, MT, PT if stated for the contact.
+- birthday: {month, day, year} for the contact. Use null for unknown components.
+- married: "married", "single", "divorced", "widowed", about the CONTACT.
+- spouseName: CONTACT's spouse name, not the user's spouse.
+- anniversary: same {month, day, year} format, for the contact.
+- kids: the CONTACT's kids only. NOT the user's kids.
+- interests: the CONTACT's hobbies/sports/etc. NOT the user's.
 
 KIDS FORMAT:
 Each kid is { name, gender, age, ageMode, ageAsOf, birthday, notes }:
@@ -812,8 +1155,31 @@ Each kid is { name, gender, age, ageMode, ageAsOf, birthday, notes }:
 - ageAsOf: if age set, { age: <number>, asOf: "${todayUS()}" }; else null
 - birthday: {month,day,year} object or null
 
-QUALITY BAR: Better to leave a field empty than guess. Do not fabricate.
-NOTES FIELD: must be the original transcript verbatim, no edits.
+QUALITY BAR: Better to leave a field empty than guess. Do not fabricate. ` +
+    `If a field would only be populated by attributing the user's statement ` +
+    `to the contact, leave it empty.
+
+MEETING SUMMARY (this is critical, replaces the old notes field):
+- meetingSummary: a summary of what the CONTACT said, revealed, decided, or ` +
+    `committed to during the conversation. This will become a contact-log ` +
+    `entry for the contact.
+- Pull out concrete details: family THE CONTACT mentioned, deals THE CONTACT ` +
+    `discussed, plans THE CONTACT shared, opinions THE CONTACT expressed.
+- DO NOT include things the USER said about themselves. If the user said "I ` +
+    `just started at ${userCompany || 'AcmeCo'}", that does NOT belong in the ` +
+    `contact's meeting summary, even though it happened during the meeting.
+- DO include things the contact said about the user's situation if they're ` +
+    `relevant to the relationship (e.g. "${userName || 'The user'} offered to ` +
+    `introduce her to a real estate broker", that's a commitment between them).
+- LEAVE OUT: stuff the user said about themselves, small talk.
+- For voice memos (case a) where the user is describing someone they already ` +
+    `know rather than recording a conversation, leave meetingSummary empty.
+- DO NOT include the verbatim transcript here. This is a summary.
+
+${lengthInstruction}
+
+DO NOT include a "notes" field. Notes are reserved for the user's manual ` +
+    `input. AI must not write to notes.
 
 TOUCHPOINT (only for voice memos describing an interaction, NOT for ` +
     `meeting transcripts):
@@ -840,13 +1206,14 @@ For voice memos, return touchpoint = { date, type, text } only if user ` +
 
   const tool = {
     name: 'extract_contact',
-    description: 'Extract structured contact information from a transcript.',
+    description: 'Extract structured contact information from a transcript. Only extract facts about the CONTACT, never about the user.',
     input_schema: {
       type: 'object',
       properties: {
-        name: { type: 'string' },
-        company: { type: 'string' },
-        role: { type: 'string' },
+        firstName: { type: 'string', description: "Contact's first/given name." },
+        lastName: { type: 'string', description: "Contact's last/family name. Empty string if not stated." },
+        company: { type: 'string', description: "Contact's current employer. NOT the user's company. Empty string if the contact never confirmed where they work." },
+        role: { type: 'string', description: "Contact's job title. NOT the user's role." },
         priority: { type: 'boolean' },
         phones: {
           type: 'array',
@@ -864,7 +1231,6 @@ For voice memos, return touchpoint = { date, type, text } only if user ` +
             required: ['label', 'value'],
           },
         },
-        linkedin: { type: 'string' },
         addresses: {
           type: 'array',
           items: {
@@ -882,29 +1248,37 @@ For voice memos, return touchpoint = { date, type, text } only if user ` +
           },
         },
         recipientName: { type: 'string' },
-        howMet: { type: 'string' },
-        howHelp: { type: 'string' },
-        topics: { type: 'string' },
-        notes: { type: 'string', description: 'Original transcript verbatim.' },
+        initialIntroduction: {
+          type: 'string',
+          description:
+            'Single short string combining how the user met the contact, the introduction context, and any topics they care about. Empty string if nothing relevant.',
+        },
+        meetingSummary: {
+          type: 'string',
+          description:
+            'Summary of what the CONTACT (not the user) said and revealed in the conversation. Length and format are dictated by the LENGTH AND FORMAT block in the system prompt. Empty string if not a conversation transcript.',
+        },
         tags: { type: 'array', items: { type: 'string' } },
-        experience: { type: 'string' },
+        experience: { type: 'string', description: "The CONTACT's career background, education, achievements. NOT the user's." },
         pastCompanies: {
           type: 'array',
+          description: "The CONTACT's previous jobs. NOT the user's previous jobs.",
           items: {
             type: 'object',
             properties: { company: { type: 'string' }, role: { type: 'string' } },
             required: ['company', 'role'],
           },
         },
-        hometown: { type: 'string' },
-        location: { type: 'string' },
+        hometown: { type: 'string', description: "Where the CONTACT grew up. NOT where the user grew up." },
+        location: { type: 'string', description: "Where the CONTACT currently lives. NOT where the user lives." },
         timezone: { type: 'string' },
         birthday: dateObjectSchema,
-        married: { type: 'string' },
-        spouseName: { type: 'string' },
+        married: { type: 'string', description: "The CONTACT's marital status." },
+        spouseName: { type: 'string', description: "The CONTACT's spouse name. NOT the user's spouse." },
         anniversary: dateObjectSchema,
         kids: {
           type: 'array',
+          description: "The CONTACT's kids. NOT the user's kids.",
           items: {
             type: 'object',
             properties: {
@@ -925,7 +1299,7 @@ For voice memos, return touchpoint = { date, type, text } only if user ` +
             required: ['name', 'gender', 'age', 'ageMode', 'birthday', 'notes'],
           },
         },
-        interests: { type: 'array', items: { type: 'string' } },
+        interests: { type: 'array', items: { type: 'string' }, description: "The CONTACT's interests. NOT the user's interests." },
         touchpoint: {
           type: ['object', 'null'],
           properties: {
@@ -938,7 +1312,7 @@ For voice memos, return touchpoint = { date, type, text } only if user ` +
           },
         },
       },
-      required: ['name', 'notes'],
+      required: ['firstName', 'lastName', 'meetingSummary'],
     },
   };
 
@@ -947,7 +1321,7 @@ For voice memos, return touchpoint = { date, type, text } only if user ` +
     result = await callClaudeWithTool({ system, prompt, tool, max_tokens: 2500 });
   } catch (e) {
     console.error('aiExtractFromVoice tool call failed:', e?.message);
-    return { ...EMPTY_VOICE_RESULT, notes: transcript };
+    return { ...EMPTY_VOICE_RESULT };
   }
 
   const safeArr = (v) => (Array.isArray(v) ? v : []);
@@ -961,8 +1335,32 @@ For voice memos, return touchpoint = { date, type, text } only if user ` +
         }
       : null;
 
-  return {
-    name: safeStr(result.name),
+  let firstName = safeStr(result.firstName);
+  let lastName = safeStr(result.lastName);
+  if (!firstName && !lastName && typeof result.name === 'string' && result.name.trim()) {
+    const trimmed = result.name.trim();
+    const idx = trimmed.indexOf(' ');
+    if (idx < 0) {
+      firstName = trimmed;
+    } else {
+      firstName = trimmed.slice(0, idx);
+      lastName = trimmed.slice(idx + 1).trim();
+    }
+  }
+
+  let initialIntroduction = safeStr(result.initialIntroduction);
+  if (!initialIntroduction) {
+    const legacyParts = [
+      safeStr(result.howMet),
+      safeStr(result.howHelp),
+      safeStr(result.topics),
+    ].filter((s) => s && s.trim());
+    if (legacyParts.length) initialIntroduction = legacyParts.join(' / ');
+  }
+
+  const normalized = {
+    firstName,
+    lastName,
     company: safeStr(result.company),
     role: safeStr(result.role),
     priority: !!result.priority,
@@ -974,7 +1372,6 @@ For voice memos, return touchpoint = { date, type, text } only if user ` +
       label: safeStr(e?.label) || 'Personal',
       value: safeStr(e?.value),
     })),
-    linkedin: safeStr(result.linkedin),
     addresses: safeArr(result.addresses).map((a) => ({
       label: safeStr(a?.label) || 'Home',
       line1: safeStr(a?.line1),
@@ -985,10 +1382,8 @@ For voice memos, return touchpoint = { date, type, text } only if user ` +
       country: safeStr(a?.country),
     })),
     recipientName: safeStr(result.recipientName),
-    howMet: safeStr(result.howMet),
-    howHelp: safeStr(result.howHelp),
-    topics: safeStr(result.topics),
-    notes: safeStr(result.notes) || transcript,
+    initialIntroduction,
+    meetingSummary: safeStr(result.meetingSummary),
     tags: safeArr(result.tags).map(safeStr).filter(Boolean),
     experience: safeStr(result.experience),
     pastCompanies: safeArr(result.pastCompanies).map((pc) => ({
@@ -1026,18 +1421,20 @@ For voice memos, return touchpoint = { date, type, text } only if user ` +
       return { date, type, text };
     })(),
   };
+
+  return scrubExtractedAgainstMyCard(normalized, myCard);
 }
 
 // ---------- aiExtractFromImage ----------
 
 export async function aiExtractFromImage(_base64) {
   return {
-    name: '',
+    firstName: '',
+    lastName: '',
     company: '',
     role: '',
     email: '',
     phone: '',
-    notes: '[Card scan extraction not yet wired up.]',
   };
 }
 
@@ -1060,10 +1457,14 @@ export async function aiSuggestOutreaches({ contacts, myCard }) {
     const bday = formatDateObject(c.birthday);
     const anniv = formatDateObject(c.anniversary);
     const tags = (c.tags || []).join(', ');
+    const displayName = [c.firstName, c.lastName]
+      .filter((s) => typeof s === 'string' && s.trim())
+      .join(' ')
+      .trim() || c.name || '';
 
     return {
       id: c.id,
-      name: c.name,
+      name: displayName,
       role: c.role,
       company: c.company,
       tags,
@@ -1073,6 +1474,7 @@ export async function aiSuggestOutreaches({ contacts, myCard }) {
       birthday: bday,
       anniversary: anniv,
       recentLog,
+      initialIntroduction: c.initialIntroduction || '',
       howMet: c.howMet || '',
       howHelp: c.howHelp || '',
     };
@@ -1088,7 +1490,8 @@ export async function aiSuggestOutreaches({ contacts, myCard }) {
     trimmed = trimmed.slice(0, 80);
   }
 
-  const userInfo = myCard?.name ? `The user is ${myCard.name}` +
+  const userDisplayName = displayNameOf(myCard);
+  const userInfo = userDisplayName ? `The user is ${userDisplayName}` +
     (myCard.role ? `, ${myCard.role}` : '') +
     (myCard.company ? ` at ${myCard.company}` : '') + '.' : '';
 
@@ -1120,6 +1523,7 @@ For each suggestion provide contactId, reason, urgency, suggestedAction.`;
           c.freq && `freq=${c.freq}`,
           c.birthday && `birthday=${c.birthday}`,
           c.anniversary && `anniversary=${c.anniversary}`,
+          c.initialIntroduction && `initialIntroduction=${c.initialIntroduction}`,
           c.howMet && `howMet=${c.howMet}`,
           c.howHelp && `howHelp=${c.howHelp}`,
           c.recentLog && `recentLog=${c.recentLog}`,
@@ -1173,29 +1577,14 @@ For each suggestion provide contactId, reason, urgency, suggestedAction.`;
       urgency: ['high', 'medium', 'low'].includes(s.urgency) ? s.urgency : 'medium',
       suggestedAction: typeof s.suggestedAction === 'string' ? s.suggestedAction.slice(0, 200) : '',
     }));
-}// =============================================================
-// PASTE THIS INTO src/utils/ai.js
-//
-// Add this function anywhere among the other exports (e.g. right after
-// `aiSummarizeMeetingForReview`). Do NOT replace any existing exports.
-// =============================================================
+}
 
 // ---------- aiExtractAttendeesFromTranscript ----------
-//
-// When Granola returns only the user as an attendee (or no attendees at
-// all), we still want to identify the OTHER people in the conversation
-// so they can be queued for review. This function reads the transcript
-// and returns a list of identified speakers other than the user.
-//
-// Returns an array of:
-//   { name, email, identifyingContext }
-//
-// Empty array if no other speakers can be confidently identified.
 
 export async function aiExtractAttendeesFromTranscript(rawText, myCard) {
   if (!rawText?.trim()) return [];
 
-  const userName = (myCard?.name || '').trim();
+  const userName = displayNameOf(myCard);
   const userCompany = (myCard?.company || '').trim();
   const userRole = (myCard?.role || '').trim();
 
@@ -1204,7 +1593,7 @@ export async function aiExtractAttendeesFromTranscript(rawText, myCard) {
       `the transcript) is ${userName}` +
       (userRole ? `, ${userRole}` : '') +
       (userCompany ? ` at ${userCompany}` : '') + '. ' +
-      `The user is NOT a candidate for the output — exclude them entirely.`
+      `The user is NOT a candidate for the output, exclude them entirely.`
     : `The user is one of the speakers. Try to infer which speaker they ` +
       `aren't, and exclude them from the output.`;
 
@@ -1240,16 +1629,7 @@ RULES:
 - Better to return fewer high-quality identifications than many guesses.
 - If you cannot identify any other speakers with reasonable confidence, ` +
     `return an empty array. Do not invent.
-- Never include the user.
-
-EXAMPLES:
-
-Good: { name: "Marcus Johnson", email: "", identifyingContext: "Senior ` +
-    `Partner at Ridgeline Advisors in Denver, met through a former colleague." }
-Good: { name: "Lane", email: "", identifyingContext: "Commercial lender ` +
-    `at Bank of Utah, exploring lending partnership for hotel deals." }
-Bad: { name: "Unknown Speaker", ... }   (skip instead)
-Bad: returning the user themselves.`;
+- Never include the user.`;
 
   const prompt = `Transcript:\n\n${rawText}`;
 
@@ -1287,7 +1667,6 @@ Bad: returning the user themselves.`;
   }
 
   const list = Array.isArray(result?.attendees) ? result.attendees : [];
-  // Dedupe by lowercase name+email, and filter out any that look like the user
   const myNameLower = userName.toLowerCase();
   const myEmailsLower = new Set();
   if (myCard?.email) myEmailsLower.add(myCard.email.toLowerCase());

@@ -25,18 +25,21 @@ import {
   updateQueueItem,
   migrateUserAsAttendee,
 } from '../utils/reviewQueue';
+import { SUMMARY_LENGTH_OPTIONS, DEFAULT_SUMMARY_LENGTH } from '../utils/ai';
+import {
+  registerForPushNotifications,
+  clearPushNotificationToken,
+} from '../utils/notifications';
 
 const MASTER_TAG_LABELS = MASTER_TAGS.map((t) => t.label);
 
 const HOLIDAY_LIST_ID = 'holiday_card_list';
 
-// AsyncStorage key for the Granola review queue. Local-only for Stage 1;
-// will migrate to Supabase user_settings when Stage 2 cron arrives.
 const REVIEW_QUEUE_STORAGE = 'crm-review-queue';
-
-// Storage key for the migration marker. Set once after migrateUserAsAttendee
-// runs successfully, so we don't keep re-running it on every app load.
 const QUEUE_MIGRATION_DONE_KEY = 'crm-queue-migration-self-attendee-done-v1';
+
+// AsyncStorage key for the meeting-summary length preference.
+const MEETING_SUMMARY_LENGTH_KEY = 'crm-meeting-summary-length';
 
 function newMailingList(name) {
   return {
@@ -67,6 +70,8 @@ export function useAppStore() {
   const [mailingLists, setMailingLists] = useState([]);
   const [samplesBannerDismissed, setSamplesBannerDismissedState] = useState(false);
   const [reviewQueue, setReviewQueue] = useState([]);
+
+  const [meetingSummaryLength, setMeetingSummaryLengthState] = useState(DEFAULT_SUMMARY_LENGTH);
 
   const [loaded, setLoaded] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -205,6 +210,13 @@ export function useAppStore() {
       } catch (_) {}
 
       try {
+        const r = await storage.get(MEETING_SUMMARY_LENGTH_KEY);
+        if (r?.value && SUMMARY_LENGTH_OPTIONS[r.value]) {
+          setMeetingSummaryLengthState(r.value);
+        }
+      } catch (_) {}
+
+      try {
         const r = await storage.get('crm-mailing-lists');
         if (r?.value) {
           setMailingLists(JSON.parse(r.value));
@@ -228,11 +240,6 @@ export function useAppStore() {
         }
       } catch (_) {}
 
-      // Load the review queue, then run the one-time self-attendee migration
-      // if it hasn't been run yet. The migration rewrites items where the
-      // attendee is the user (legacy bug) into no-name items the UI can
-      // render. Persists the result back to storage and marks the migration
-      // done so it never runs again.
       try {
         const r = await storage.get(REVIEW_QUEUE_STORAGE);
         let parsed = [];
@@ -341,6 +348,61 @@ export function useAppStore() {
       await storage.set('crm-samples-requested', val ? 'true' : 'false');
     } catch (_) {}
   }, []);
+
+  const saveMeetingSummaryLength = useCallback(async (value) => {
+    if (!SUMMARY_LENGTH_OPTIONS[value]) {
+      console.warn('saveMeetingSummaryLength: invalid value', value);
+      return;
+    }
+    setMeetingSummaryLengthState(value);
+    try {
+      await storage.set(MEETING_SUMMARY_LENGTH_KEY, value);
+    } catch (_) {}
+  }, []);
+
+  // ---------- Push notifications ----------
+  //
+  // Three toggles live on the Supabase profiles row (not AsyncStorage)
+  // because the server-side cron job needs to read them when deciding
+  // whom to push to. Toggle UI in Settings reads/writes via the
+  // saveNotificationPrefs callback below.
+  //
+  // registerPushToken runs the permission-request and token-registration
+  // flow. Returns the status code so the caller can react (e.g., show a
+  // "permission denied" message).
+
+  const notificationsEnabled = !!profile?.notifications_enabled;
+  const notifOverdue = !!profile?.notif_overdue;
+  const notifBirthdays = !!profile?.notif_birthdays;
+  const hasPushToken = !!profile?.expo_push_token;
+
+  const saveNotificationPrefs = useCallback(
+    async (patch) => {
+      // patch is a partial object like { notifications_enabled: true }.
+      // Optimistically update local profile state, then persist.
+      setProfile((p) => (p ? { ...p, ...patch } : p));
+      try {
+        await updateProfile(patch);
+      } catch (e) {
+        console.warn('saveNotificationPrefs failed:', e?.message);
+        await refetchProfile();
+      }
+    },
+    [refetchProfile],
+  );
+
+  const registerPushToken = useCallback(async () => {
+    const result = await registerForPushNotifications();
+    if (result.status === 'ok') {
+      await refetchProfile();
+    }
+    return result;
+  }, [refetchProfile]);
+
+  const removePushToken = useCallback(async () => {
+    await clearPushNotificationToken();
+    await refetchProfile();
+  }, [refetchProfile]);
 
   const clearSampleContacts = useCallback(() => {
     const next = contacts.filter((c) => !c.isSample);
@@ -629,6 +691,11 @@ export function useAppStore() {
     samplesBannerDismissed,
     mailingLists,
     reviewQueue,
+    meetingSummaryLength,
+    notificationsEnabled,
+    notifOverdue,
+    notifBirthdays,
+    hasPushToken,
     loaded,
     saving,
     contactsFetchError,
@@ -664,6 +731,10 @@ export function useAppStore() {
     savePassword,
     saveUseType,
     saveSamplesRequested,
+    saveMeetingSummaryLength,
+    saveNotificationPrefs,
+    registerPushToken,
+    removePushToken,
     clearSampleContacts,
     dismissSamplesBanner,
     createMailingList,
