@@ -1,6 +1,6 @@
 // supabase/functions/send-notifications/index.ts
 //
-// Daily push-notification sender for Radius.
+// Daily push-notification sender for Veery.
 //
 // Runs on a schedule (via pg_cron, see setup SQL). For every user who:
 //   - has notifications_enabled = true
@@ -278,7 +278,7 @@ Deno.serve(async (_req) => {
 
     const title =
       birthdayNames.length > 0 || anniversaryNames.length > 0
-        ? 'Radius reminder'
+        ? 'Veery reminder'
         : 'Time to reconnect';
 
     messages.push({

@@ -71,7 +71,7 @@ export default function AuthScreen({ onAuthed }) {
           textAlign: 'center',
         }}
       >
-        Radius
+        Veery
       </Text>
       <Text
         style={{

@@ -149,7 +149,7 @@ export default function SettingsScreen({
   async function exportAll() {
     try {
       const allVcf = contacts.filter((c) => !c.archived).map(makeVcf).join('\r\n');
-      const path = FileSystem.cacheDirectory + 'radius_contacts.vcf';
+      const path = FileSystem.cacheDirectory + 'veery_contacts.vcf';
       await FileSystem.writeAsStringAsync(path, allVcf);
       if (await Sharing.isAvailableAsync()) {
         await Sharing.shareAsync(path, { mimeType: 'text/vcard' });
@@ -171,7 +171,7 @@ export default function SettingsScreen({
         mailingLists,
         exportedAt: new Date().toISOString(),
       });
-      const path = FileSystem.cacheDirectory + 'radius_backup.json';
+      const path = FileSystem.cacheDirectory + 'veery_backup.json';
       await FileSystem.writeAsStringAsync(path, data);
       if (await Sharing.isAvailableAsync()) {
         await Sharing.shareAsync(path, { mimeType: 'application/json' });
@@ -700,7 +700,7 @@ export default function SettingsScreen({
         </TouchableOpacity>
 
         <TouchableOpacity
-          onPress={() => Linking.openURL('mailto:dallinrearl@gmail.com?subject=Radius feedback')}
+          onPress={() => Linking.openURL('mailto:veeryapp@gmail.com?subject=Veery feedback')}
           style={{
             backgroundColor: theme.bg2,
             borderWidth: 1,
@@ -782,7 +782,7 @@ export default function SettingsScreen({
             alignItems: 'center',
           }}
         >
-          <Text style={{ color: theme.t6, fontSize: 11 }}>Radius v1.0</Text>
+          <Text style={{ color: theme.t6, fontSize: 11 }}>Veery v1.0</Text>
         </View>
 
         <TouchableOpacity
@@ -911,7 +911,7 @@ function NotificationsBody({
           if (result.status === 'denied') {
             Alert.alert(
               'Notifications blocked',
-              'You denied permission. Open your device Settings to enable notifications for Radius.',
+              'You denied permission. Open your device Settings to enable notifications for Veery.',
               [
                 { text: 'OK', style: 'cancel' },
                 { text: 'Open Settings', onPress: () => Linking.openSettings() },

@@ -255,7 +255,7 @@ export function useAppStore() {
           const { migrated, changedCount } = migrateUserAsAttendee(parsed, loadedMyCard);
           if (changedCount > 0) {
             console.log(
-              `[Radius] One-time queue migration: rewrote ${changedCount} self-attendee item${changedCount === 1 ? '' : 's'} as no-name.`,
+              `[Veery] One-time queue migration: rewrote ${changedCount} self-attendee item${changedCount === 1 ? '' : 's'} as no-name.`,
             );
             parsed = migrated;
             try {

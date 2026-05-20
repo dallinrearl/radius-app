@@ -344,7 +344,7 @@ export default function StatsScreen({ activeContacts }) {
             fontFamily: theme.fontDisplay,
           }}
         >
-          Your Radius
+          Your Activity
         </Text>
         <Text style={{ fontSize: 12, color: theme.t5, marginBottom: 20 }}>
           Insights into your relationship building

@@ -20,7 +20,8 @@
 //     noteId:           Granola note ID
 //     meetingTitle:     human-readable title
 //     meetingDate:      'YYYY-MM-DD'
-//     attendee:         { name, email }
+//     attendee:         { name, email }    ← may be empty when Granola only
+//                                            returned the user (rare)
 //     suggestion:       { contactId, reason } | null
 //     status:           'pending' (only kind we render)
 //     triageState:      'new' | 'later' | 'archived'
@@ -32,11 +33,13 @@
 
 // Build a stable queue-item ID. Same noteId + same attendee key always
 // produces the same ID, so re-syncing a meeting can't enqueue duplicates.
+// For attendee-less items (Granola only returned the user), the key is
+// the literal '_unassigned' so the meeting itself gets a single stable id.
 export function buildQueueItemId(noteId, attendee) {
-  const key = (attendee?.email || attendee?.name || 'unknown')
-    .toLowerCase()
-    .trim()
-    .replace(/[^a-z0-9]/g, '_');
+  const raw = attendee?.email || attendee?.name || '';
+  const key = raw
+    ? raw.toLowerCase().trim().replace(/[^a-z0-9]/g, '_')
+    : '_unassigned';
   return `rq_${noteId}_${key}`;
 }
 
@@ -155,4 +158,71 @@ export function findContactsByFirstName(attendeeName, contacts) {
     const cFirst = c.name.trim().split(/\s+/)[0];
     return cFirst && cFirst.toLowerCase() === target;
   });
+}
+
+// One-time migration helper.
+//
+// Background: earlier sync runs queued the user themselves as an attendee
+// in meetings where Granola only returned the user. Those items got
+// filtered out of the UI for being "self," resulting in invisible queue
+// bloat. This helper strips the user's identity from any such items,
+// converting them into "no-name" queue items the UI can render as needing
+// AI attendee extraction.
+//
+// Returns:
+//   { migrated: <new queue>, changedCount: <how many items were rewritten> }
+//
+// Safe to call repeatedly; items that were already migrated have empty
+// attendees and pass through unchanged.
+export function migrateUserAsAttendee(queue, myCard) {
+  if (!Array.isArray(queue) || queue.length === 0) {
+    return { migrated: queue || [], changedCount: 0 };
+  }
+  const myEmails = new Set();
+  if (myCard?.email) myEmails.add(myCard.email.toLowerCase().trim());
+  if (Array.isArray(myCard?.emails)) {
+    for (const e of myCard.emails) {
+      if (e?.value) myEmails.add(e.value.toLowerCase().trim());
+    }
+  }
+  const myNames = new Set();
+  if (myCard?.name) myNames.add(myCard.name.toLowerCase().trim());
+  if (myCard?.displayName) myNames.add(myCard.displayName.toLowerCase().trim());
+
+  if (myEmails.size === 0 && myNames.size === 0) {
+    return { migrated: queue, changedCount: 0 };
+  }
+
+  let changedCount = 0;
+  const migrated = queue.map((item) => {
+    const email = (item?.attendee?.email || '').toLowerCase().trim();
+    const name = (item?.attendee?.name || '').toLowerCase().trim();
+    const isSelf =
+      (email && myEmails.has(email)) || (name && myNames.has(name));
+    if (!isSelf) return item;
+    changedCount++;
+    // Rewrite to a no-name item. Keep noteId + meeting + transcript intact.
+    // Rebuild the id under the '_unassigned' key so it stays stable on
+    // future syncs/migrations.
+    const newAttendee = { name: '', email: '' };
+    const newId = buildQueueItemId(item.noteId, newAttendee);
+    return {
+      ...item,
+      attendee: newAttendee,
+      id: newId,
+      // Drop any contact suggestion that was based on the self-match
+      suggestion: null,
+    };
+  });
+
+  // Deduplicate by id in case two old self-items pointed at the same meeting
+  const seen = new Set();
+  const deduped = [];
+  for (const it of migrated) {
+    if (seen.has(it.id)) continue;
+    seen.add(it.id);
+    deduped.push(it);
+  }
+
+  return { migrated: deduped, changedCount };
 }

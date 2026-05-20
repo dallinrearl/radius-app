@@ -817,14 +817,14 @@ function ImportContacts({ onComplete, contacts, onCommit, showToast, onBack }) {
       Alert.alert(
         'Nothing new to import',
         skipped > 0
-          ? `All ${skipped} selected contact${skipped === 1 ? '' : 's'} are already in Radius.`
+          ? `All ${skipped} selected contact${skipped === 1 ? '' : 's'} are already in Veery.`
           : 'No new contacts.',
       );
       return;
     }
 
     onCommit([...contacts, ...newOnes]);
-    const skipText = skipped > 0 ? ` ${skipped} already in Radius, skipped.` : '';
+    const skipText = skipped > 0 ? ` ${skipped} already in Veery, skipped.` : '';
     showToast('Imported ' + newOnes.length + ' contacts.' + skipText, theme.ac);
     onBack();
   }

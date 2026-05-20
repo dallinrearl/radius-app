@@ -1,9 +1,9 @@
 {
   "expo": {
-    "name": "Radius",
-    "slug": "radius-app",
+    "name": "Veery",
+    "slug": "veery-app",
     "version": "1.0.0",
-    "scheme": "radius",
+    "scheme": "veery",
     "orientation": "portrait",
     "userInterfaceStyle": "automatic",
     "assetBundlePatterns": [
@@ -11,16 +11,16 @@
     ],
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.radius.app",
+      "bundleIdentifier": "com.veery.app",
       "infoPlist": {
-        "NSCameraUsageDescription": "Radius uses the camera to scan business cards and QR codes.",
-        "NSMicrophoneUsageDescription": "Radius uses the microphone to record voice notes for new contacts.",
-        "NSContactsUsageDescription": "Radius can import contacts from your address book.",
-        "NSPhotoLibraryUsageDescription": "Radius needs photo access to scan business cards from your library."
+        "NSCameraUsageDescription": "Veery uses the camera to scan business cards and QR codes.",
+        "NSMicrophoneUsageDescription": "Veery uses the microphone to record voice notes for new contacts.",
+        "NSContactsUsageDescription": "Veery can import contacts from your address book.",
+        "NSPhotoLibraryUsageDescription": "Veery needs photo access to scan business cards from your library."
       }
     },
     "android": {
-      "package": "com.radius.app",
+      "package": "com.veery.app",
       "permissions": [
         "android.permission.CAMERA",
         "android.permission.RECORD_AUDIO",
@@ -35,19 +35,19 @@
       [
         "expo-camera",
         {
-          "cameraPermission": "Allow Radius to use the camera to scan business cards."
+          "cameraPermission": "Allow Veery to use the camera to scan business cards."
         }
       ],
       [
         "expo-contacts",
         {
-          "contactsPermission": "Allow Radius to access your contacts."
+          "contactsPermission": "Allow Veery to access your contacts."
         }
       ],
       [
         "expo-image-picker",
         {
-          "photosPermission": "Allow Radius to access your photos."
+          "photosPermission": "Allow Veery to access your photos."
         }
       ],
       [
