@@ -96,7 +96,7 @@ export async function getNoteWithTranscript(apiKey, noteId) {
 
 // ---------- Attendee matching ----------
 
-// Returns an object describing how each attendee maps to a Veery contact.
+// Returns an object describing how each attendee maps to a Veery contact.findstr /s /i /n "radius" src\*.*
 //
 // Result shape:
 //   {
