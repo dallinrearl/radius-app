@@ -18,6 +18,8 @@ import {
   QrIcon,
   UsersIcon,
   CardIcon,
+  ChatIcon,
+  ChevronDown,
   XIcon,
 } from '../components/Icons';
 import * as Contacts from 'expo-contacts';
@@ -28,10 +30,10 @@ import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system';
 import QRCode from 'react-native-qrcode-svg';
 import { aiExtractFromVoice, aiExtractFromImage } from '../utils/ai';
-import { makeVcf } from '../utils/helpers';
-import { EMPTY_CONTACT } from '../constants';
+import { makeVcf, isoToday } from '../utils/helpers';
+import { EMPTY_CONTACT, splitLegacyName, getDisplayName } from '../constants';
 
-export default function AddScreen({ mode, setMode, onComplete, contacts, myCard, onBack, onCommit, showToast }) {
+export default function AddScreen({ mode, setMode, onComplete, contacts, myCard, onBack, onCommit, showToast, reviewQueue }) {
   const { theme } = useTheme();
   const insets = useSafeAreaInsets();
 
@@ -68,7 +70,7 @@ export default function AddScreen({ mode, setMode, onComplete, contacts, myCard,
           Choose how you'd like to add this person.
         </Text>
 
-        {/* Manual entry - top */}
+        {/* Manual entry */}
         <TouchableOpacity
           onPress={() => setMode('manual')}
           activeOpacity={0.8}
@@ -132,7 +134,63 @@ export default function AddScreen({ mode, setMode, onComplete, contacts, myCard,
           />
         </View>
 
-        {/* Share my card - bottom */}
+        {/* From Granola */}
+        <TouchableOpacity
+          onPress={() => setMode('granola')}
+          activeOpacity={0.8}
+          style={{
+            backgroundColor: theme.bg2,
+            borderWidth: 1,
+            borderColor: theme.brd,
+            borderRadius: 16,
+            padding: 16,
+            flexDirection: 'row',
+            alignItems: 'center',
+            gap: 12,
+            marginTop: 6,
+          }}
+        >
+          <View
+            style={{
+              width: 44,
+              height: 44,
+              borderRadius: 12,
+              backgroundColor: theme.purp + '22',
+              alignItems: 'center',
+              justifyContent: 'center',
+            }}
+          >
+            <ChatIcon size={20} color={theme.purp} strokeWidth={1.8} />
+          </View>
+          <View style={{ flex: 1 }}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+              <Text style={{ color: theme.t1, fontSize: 14, fontWeight: '600' }}>
+                From Granola
+              </Text>
+              {Array.isArray(reviewQueue) && reviewQueue.length > 0 ? (
+                <View
+                  style={{
+                    paddingHorizontal: 6,
+                    paddingVertical: 1,
+                    borderRadius: 6,
+                    backgroundColor: theme.purp,
+                  }}
+                >
+                  <Text style={{ fontSize: 9, color: '#fff', fontWeight: '700' }}>
+                    {reviewQueue.length}
+                  </Text>
+                </View>
+              ) : null}
+            </View>
+            <Text style={{ color: theme.t5, fontSize: 11, marginTop: 2 }}>
+              {Array.isArray(reviewQueue) && reviewQueue.length > 0
+                ? 'Review meeting attendees waiting to be added'
+                : 'Meetings will show up here after Granola syncs'}
+            </Text>
+          </View>
+        </TouchableOpacity>
+
+        {/* Share my card */}
         <TouchableOpacity
           onPress={() => setMode('share')}
           activeOpacity={0.8}
@@ -198,6 +256,37 @@ function GridButton({ icon, label, sublabel, onPress }) {
   );
 }
 
+// Static checklist of things worth mentioning in a voice note.
+const VOICE_TIP_GROUPS = [
+  {
+    label: 'The basics',
+    items: [
+      'Full name',
+      'Where they work and what they do',
+      'How you met (event, mutual friend, intro)',
+      'Phone or email if you have it',
+    ],
+  },
+  {
+    label: 'Personal context',
+    items: [
+      'Where they live and where they\'re from',
+      'Spouse / partner name',
+      'Kids (names, ages)',
+      'Hobbies or interests they mentioned',
+    ],
+  },
+  {
+    label: 'Why this contact matters',
+    items: [
+      'What they\'re working on or looking for',
+      'Topics they care about',
+      'Anything they asked you for',
+      'Anything you committed to send them',
+    ],
+  },
+];
+
 function VoiceCapture({ onComplete, onBack }) {
   const { theme } = useTheme();
   const insets = useSafeAreaInsets();
@@ -205,6 +294,9 @@ function VoiceCapture({ onComplete, onBack }) {
   const [recState, setRecState] = useState('idle');
   const [transcript, setTranscript] = useState('');
   const [extracting, setExtracting] = useState(false);
+  // Both default closed to keep the screen clean. Users expand what they need.
+  const [tipsOpen, setTipsOpen] = useState(false);
+  const [transcriptOpen, setTranscriptOpen] = useState(false);
 
   async function start() {
     try {
@@ -243,35 +335,42 @@ function VoiceCapture({ onComplete, onBack }) {
     const fields = await aiExtractFromVoice(transcript);
     setExtracting(false);
 
-    // Pull touchpoint out of the AI result so it doesn't pollute the
-    // contact form. The full transcript goes to ONE of two places:
-    //   - touchpoint exists → convLog entry, notes stays empty
-    //   - touchpoint is null → notes field, convLog stays empty
-    // Either way the user has the verbatim transcript preserved.
-    const { touchpoint, ...formFields } = fields;
+    const { touchpoint, meetingSummary, ...formFields } = fields;
     const seed = { ...EMPTY_CONTACT, ...formFields };
+    seed.notes = '';
 
     if (touchpoint) {
       const entry = {
         id: 'voice_' + Date.now(),
         date: touchpoint.date,
         type: touchpoint.type,
-        text: transcript.trim(),
+        text: (meetingSummary || '').trim() || transcript.trim(),
+        rawTranscript: transcript.trim(),
       };
       seed.convLog = [entry, ...(seed.convLog || [])];
-      // Anchor frequency math to when they actually interacted.
       seed.lastContacted = touchpoint.date;
-      // Touchpoint owns the transcript. Clear notes so it isn't duplicated.
-      seed.notes = '';
+    } else if (transcript.trim()) {
+      const entry = {
+        id: 'voice_' + Date.now(),
+        date: isoToday(),
+        type: 'other',
+        text: 'Voice memo describing this contact.',
+        rawTranscript: transcript.trim(),
+      };
+      seed.convLog = [entry, ...(seed.convLog || [])];
     } else {
-      // No interaction described — keep transcript in notes (already set
-      // by the AI extraction's verbatim notes field). Make sure convLog
-      // is empty so the user doesn't see a phantom log entry.
       seed.convLog = [];
     }
 
     onComplete(seed);
   }
+
+  // Preview shown in the collapsed transcript header so the user knows
+  // their typed content is still there.
+  const transcriptPreview = transcript.trim()
+    ? transcript.trim().replace(/\s+/g, ' ').slice(0, 60) +
+      (transcript.trim().length > 60 ? '...' : '')
+    : 'Type or paste your transcript';
 
   return (
     <ScrollView
@@ -324,26 +423,206 @@ function VoiceCapture({ onComplete, onBack }) {
         </Text>
       </View>
 
-      <Text style={{ color: theme.t4, fontSize: 11, fontWeight: '700', marginBottom: 8 }}>
-        TRANSCRIPT
-      </Text>
-      <StyledInput
-        value={transcript}
-        onChangeText={setTranscript}
-        placeholder="e.g. Met Sarah at the conference, she works at Blackstone, email schen@blackstone.com..."
-        multiline
-        style={{ minHeight: 140 }}
-      />
-      <Text style={{ color: theme.t6, fontSize: 11, marginTop: 8, marginBottom: 14 }}>
-        Note: real-time transcription wires up later. For now, type or paste your notes.
-      </Text>
+      {/* Collapsible transcript section */}
+      <View
+        style={{
+          backgroundColor: theme.bg2,
+          borderWidth: 1,
+          borderColor: theme.brd,
+          borderRadius: 14,
+          overflow: 'hidden',
+          marginBottom: 14,
+        }}
+      >
+        <TouchableOpacity
+          onPress={() => setTranscriptOpen((o) => !o)}
+          activeOpacity={0.7}
+          style={{
+            flexDirection: 'row',
+            alignItems: 'center',
+            padding: 14,
+            gap: 10,
+          }}
+        >
+          <View style={{ flex: 1 }}>
+            <Text
+              style={{
+                fontSize: 11,
+                fontWeight: '700',
+                color: theme.t4,
+                letterSpacing: 0.5,
+              }}
+            >
+              TRANSCRIPT
+            </Text>
+            {!transcriptOpen ? (
+              <Text
+                style={{
+                  color: transcript.trim() ? theme.t3 : theme.t6,
+                  fontSize: 12,
+                  marginTop: 4,
+                }}
+                numberOfLines={1}
+              >
+                {transcriptPreview}
+              </Text>
+            ) : null}
+          </View>
+          <View style={{ transform: [{ rotate: transcriptOpen ? '180deg' : '0deg' }] }}>
+            <ChevronDown size={16} color={theme.t5} />
+          </View>
+        </TouchableOpacity>
+
+        {transcriptOpen && (
+          <View
+            style={{
+              paddingHorizontal: 14,
+              paddingBottom: 14,
+              borderTopWidth: 1,
+              borderTopColor: theme.brd,
+              paddingTop: 12,
+            }}
+          >
+            <StyledInput
+              value={transcript}
+              onChangeText={setTranscript}
+              placeholder="e.g. Met Sarah at the conference, she works at Blackstone, email schen@blackstone.com..."
+              multiline
+              style={{ minHeight: 140 }}
+            />
+            <Text style={{ color: theme.t6, fontSize: 11, marginTop: 8 }}>
+              Note: real-time transcription wires up later. For now, type or paste your notes.
+            </Text>
+          </View>
+        )}
+      </View>
 
       <PrimaryButton
         onPress={processTranscript}
         label={extracting ? 'Extracting...' : 'Continue'}
         disabled={!transcript.trim() || extracting}
       />
+
+      {/* What to mention: collapsible static checklist */}
+      <VoiceTipsBlock
+        open={tipsOpen}
+        onToggle={() => setTipsOpen((o) => !o)}
+        theme={theme}
+      />
     </ScrollView>
+  );
+}
+
+function VoiceTipsBlock({ open, onToggle, theme }) {
+  return (
+    <View
+      style={{
+        marginTop: 20,
+        backgroundColor: theme.purp + '10',
+        borderWidth: 1,
+        borderColor: theme.purp + '35',
+        borderRadius: 14,
+        overflow: 'hidden',
+      }}
+    >
+      <TouchableOpacity
+        onPress={onToggle}
+        activeOpacity={0.7}
+        style={{
+          flexDirection: 'row',
+          alignItems: 'center',
+          padding: 14,
+          gap: 10,
+        }}
+      >
+        <View
+          style={{
+            width: 28,
+            height: 28,
+            borderRadius: 14,
+            backgroundColor: theme.purp + '25',
+            alignItems: 'center',
+            justifyContent: 'center',
+          }}
+        >
+          <Text style={{ fontSize: 14 }}>💡</Text>
+        </View>
+        <View style={{ flex: 1 }}>
+          <Text style={{ color: theme.t1, fontSize: 13, fontWeight: '600' }}>
+            What to mention
+          </Text>
+          <Text style={{ color: theme.t5, fontSize: 11, marginTop: 1 }}>
+            {open ? 'Tap to hide' : 'Tap to see suggestions'}
+          </Text>
+        </View>
+        <View style={{ transform: [{ rotate: open ? '180deg' : '0deg' }] }}>
+          <ChevronDown size={16} color={theme.purp} />
+        </View>
+      </TouchableOpacity>
+      {open && (
+        <View
+          style={{
+            paddingHorizontal: 14,
+            paddingBottom: 14,
+            paddingTop: 2,
+            borderTopWidth: 1,
+            borderTopColor: theme.purp + '25',
+          }}
+        >
+          <Text
+            style={{
+              color: theme.t4,
+              fontSize: 11,
+              lineHeight: 16,
+              marginTop: 10,
+              marginBottom: 12,
+              fontStyle: 'italic',
+            }}
+          >
+            Don't worry about hitting every item. Cover whatever you know and skip the rest.
+          </Text>
+          {VOICE_TIP_GROUPS.map((group) => (
+            <View key={group.label} style={{ marginBottom: 12 }}>
+              <Text
+                style={{
+                  fontSize: 10,
+                  fontWeight: '700',
+                  color: theme.purp,
+                  letterSpacing: 0.5,
+                  textTransform: 'uppercase',
+                  marginBottom: 6,
+                }}
+              >
+                {group.label}
+              </Text>
+              {group.items.map((item) => (
+                <View
+                  key={item}
+                  style={{
+                    flexDirection: 'row',
+                    alignItems: 'flex-start',
+                    gap: 8,
+                    marginBottom: 4,
+                  }}
+                >
+                  <Text style={{ color: theme.purp, fontSize: 12, lineHeight: 18 }}>•</Text>
+                  <Text
+                    style={{
+                      flex: 1,
+                      color: theme.t3,
+                      fontSize: 12,
+                      lineHeight: 18,
+                    }}
+                  >
+                    {item}
+                  </Text>
+                </View>
+              ))}
+            </View>
+          ))}
+        </View>
+      )}
+    </View>
   );
 }
 
@@ -491,28 +770,77 @@ function ImportContacts({ onComplete, contacts, onCommit, showToast, onBack }) {
       Alert.alert('Pick at least one contact');
       return;
     }
-    const newOnes = chosen.map((d, i) => ({
-      ...EMPTY_CONTACT,
-      id: 'imp_' + Date.now() + '_' + i,
-      name: d.name,
-      company: d.company || '',
-      role: d.jobTitle || '',
-      phone: d.phoneNumbers?.[0]?.number || '',
-      email: d.emails?.[0]?.email || '',
-    }));
+
+    // Build lookup of existing contacts so we skip people already saved.
+    const existingNames = new Set();
+    const existingEmails = new Set();
+    for (const c of contacts) {
+      const dn = getDisplayName(c)?.toLowerCase().trim();
+      if (dn) existingNames.add(dn);
+      const emailList = Array.isArray(c.emails) ? c.emails : [];
+      for (const e of emailList) {
+        if (e?.value) existingEmails.add(e.value.toLowerCase().trim());
+      }
+      if (c.email) existingEmails.add(String(c.email).toLowerCase().trim());
+    }
+
+    let skipped = 0;
+    const newOnes = chosen
+      .map((d, i) => {
+        const split = splitLegacyName(d.name || '');
+        const phone = d.phoneNumbers?.[0]?.number || '';
+        const email = d.emails?.[0]?.email || '';
+        return {
+          ...EMPTY_CONTACT,
+          id: 'imp_' + Date.now() + '_' + i,
+          firstName: split.firstName,
+          lastName: split.lastName,
+          company: d.company || '',
+          role: d.jobTitle || '',
+          phones: phone ? [{ label: 'Cell', value: phone }] : [],
+          emails: email ? [{ label: 'Personal', value: email }] : [],
+        };
+      })
+      .filter((c) => {
+        const dn = getDisplayName(c)?.toLowerCase().trim();
+        const em = c.emails?.[0]?.value?.toLowerCase().trim();
+        if ((dn && existingNames.has(dn)) || (em && existingEmails.has(em))) {
+          skipped++;
+          return false;
+        }
+        if (dn) existingNames.add(dn);
+        if (em) existingEmails.add(em);
+        return true;
+      });
+
+    if (newOnes.length === 0) {
+      Alert.alert(
+        'Nothing new to import',
+        skipped > 0
+          ? `All ${skipped} selected contact${skipped === 1 ? '' : 's'} are already in Veery.`
+          : 'No new contacts.',
+      );
+      return;
+    }
+
     onCommit([...contacts, ...newOnes]);
-    showToast('Imported ' + newOnes.length + ' contacts', theme.ac);
+    const skipText = skipped > 0 ? ` ${skipped} already in Veery, skipped.` : '';
+    showToast('Imported ' + newOnes.length + ' contacts.' + skipText, theme.ac);
     onBack();
   }
 
   function importOne(d) {
+    const split = splitLegacyName(d.name || '');
+    const phone = d.phoneNumbers?.[0]?.number || '';
+    const email = d.emails?.[0]?.email || '';
     const c = {
       ...EMPTY_CONTACT,
-      name: d.name,
+      firstName: split.firstName,
+      lastName: split.lastName,
       company: d.company || '',
       role: d.jobTitle || '',
-      phone: d.phoneNumbers?.[0]?.number || '',
-      email: d.emails?.[0]?.email || '',
+      phones: phone ? [{ label: 'Cell', value: phone }] : [],
+      emails: email ? [{ label: 'Personal', value: email }] : [],
     };
     onComplete(c);
   }
@@ -642,17 +970,86 @@ function ReceiveCard({ onComplete, onBack }) {
 
   function parseVcard(text) {
     const c = { ...EMPTY_CONTACT };
+    const phones = [];
+    const emails = [];
+    let structuredName = null;
+    let formattedName = '';
+
+    function mapPhoneType(types) {
+      const upper = (types || []).map((t) => t.toUpperCase());
+      if (upper.includes('CELL') || upper.includes('MOBILE')) return 'Cell';
+      if (upper.includes('WORK')) return 'Work';
+      if (upper.includes('HOME')) return 'Home';
+      return 'Other';
+    }
+    function mapEmailType(types) {
+      const upper = (types || []).map((t) => t.toUpperCase());
+      if (upper.includes('WORK')) return 'Work';
+      if (upper.includes('HOME')) return 'Personal';
+      return 'Personal';
+    }
+
     text.split(/\r?\n/).forEach((line) => {
-      const [keyRaw, ...rest] = line.split(':');
-      const value = rest.join(':');
-      const key = keyRaw.split(';')[0].toUpperCase();
-      if (key === 'FN') c.name = value;
-      else if (key === 'ORG') c.company = value;
-      else if (key === 'TITLE') c.role = value;
-      else if (key === 'TEL') c.phone = value;
-      else if (key === 'EMAIL') c.email = value;
-      else if (key === 'NOTE') c.notes = value;
+      if (!line || line.startsWith('BEGIN:') || line.startsWith('END:') || line.startsWith('VERSION:')) {
+        return;
+      }
+      const colonIdx = line.indexOf(':');
+      if (colonIdx < 0) return;
+      const keyPart = line.slice(0, colonIdx);
+      const value = line.slice(colonIdx + 1);
+      const keyTokens = keyPart.split(';');
+      const key = keyTokens[0].toUpperCase();
+      const params = keyTokens.slice(1);
+      const types = [];
+      params.forEach((p) => {
+        const eq = p.indexOf('=');
+        if (eq < 0) {
+          types.push(p);
+        } else {
+          const k = p.slice(0, eq).toUpperCase();
+          const v = p.slice(eq + 1);
+          if (k === 'TYPE') {
+            v.split(',').forEach((t) => types.push(t));
+          }
+        }
+      });
+
+      if (key === 'FN') {
+        formattedName = value.trim();
+      } else if (key === 'N') {
+        const parts = value.split(';');
+        structuredName = {
+          lastName: (parts[0] || '').trim(),
+          firstName: (parts[1] || '').trim(),
+        };
+      } else if (key === 'ORG') {
+        c.company = value.trim();
+      } else if (key === 'TITLE') {
+        c.role = value.trim();
+      } else if (key === 'TEL') {
+        if (value.trim()) {
+          phones.push({ label: mapPhoneType(types), value: value.trim() });
+        }
+      } else if (key === 'EMAIL') {
+        if (value.trim()) {
+          emails.push({ label: mapEmailType(types), value: value.trim() });
+        }
+      } else if (key === 'NOTE') {
+        c.notes = value.trim();
+      }
     });
+
+    if (structuredName && (structuredName.firstName || structuredName.lastName)) {
+      c.firstName = structuredName.firstName;
+      c.lastName = structuredName.lastName;
+    } else if (formattedName) {
+      const split = splitLegacyName(formattedName);
+      c.firstName = split.firstName;
+      c.lastName = split.lastName;
+    }
+
+    c.phones = phones;
+    c.emails = emails;
     return c;
   }
 

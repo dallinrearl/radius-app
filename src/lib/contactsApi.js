@@ -2,17 +2,20 @@ import { supabase } from './supabase';
 
 // Translate a contact from the database (snake_case + extra JSON)
 // into the local app shape (camelCase, flat).
+//
+// PHASE 4 NOTE: The contacts table no longer has `name`, `email`, `phone`,
+// `how_we_met`, or `how_i_can_help` columns. They've been replaced by
+// first_name / last_name / initial_introduction, and emails/phones now
+// live in the `extra` jsonb as arrays (extra.emails, extra.phones).
 function fromDb(row) {
   const extra = row.extra || {};
   return {
     id: row.id,
-    name: row.name || '',
+    firstName: row.first_name || '',
+    lastName: row.last_name || '',
     company: row.company || '',
     role: row.role || '',
-    email: row.email || '',
-    phone: row.phone || '',
-    howMet: row.how_we_met || '',
-    howHelp: row.how_i_can_help || '',
+    initialIntroduction: row.initial_introduction || '',
     notes: row.notes || '',
     lastContacted: row.last_contacted_at ? String(row.last_contacted_at).slice(0, 10) : '',
     tags: row.tags || [],
@@ -21,8 +24,6 @@ function fromDb(row) {
     photo: row.photo_url || '',
     archived: row.archived || false,
     // Fields stored inside the extra JSON blob.
-    linkedin: extra.linkedin || '',
-    topics: extra.topics || '',
     birthday: extra.birthday || '',
     timezone: extra.timezone || '',
     location: extra.location || '',
@@ -35,7 +36,10 @@ function fromDb(row) {
     experience: extra.experience || '',
     pastCompanies: extra.pastCompanies || [],
     convLog: extra.convLog || [],
-    // New multi-entry contact info + mailing list fields.
+    customFollowUpDate: extra.customFollowUpDate || '',
+    freqStartedAt: extra.freqStartedAt || '',
+    freqDayOfWeek: typeof extra.freqDayOfWeek === 'number' ? extra.freqDayOfWeek : null,
+    // Multi-entry contact info + mailing list fields.
     phones: Array.isArray(extra.phones) ? extra.phones : [],
     emails: Array.isArray(extra.emails) ? extra.emails : [],
     addresses: Array.isArray(extra.addresses) ? extra.addresses : [],
@@ -69,17 +73,51 @@ function generateUuid() {
   });
 }
 
+// Best-effort split for any contact that still has a legacy `name` string
+// but lacks firstName/lastName. Used on the way IN to the DB so we never
+// send a `name` field (the column doesn't exist anymore) and never lose
+// a name that the caller forgot to split.
+function ensureSplitName(contact) {
+  const firstName = (contact.firstName || '').trim();
+  const lastName = (contact.lastName || '').trim();
+  if (firstName || lastName) {
+    return { firstName, lastName };
+  }
+  const legacy = (contact.name || '').trim();
+  if (!legacy) return { firstName: '', lastName: '' };
+  const idx = legacy.indexOf(' ');
+  if (idx < 0) return { firstName: legacy, lastName: '' };
+  return {
+    firstName: legacy.slice(0, idx).trim(),
+    lastName: legacy.slice(idx + 1).trim(),
+  };
+}
+
+// Same for initial_introduction. Fold legacy howMet/howHelp/topics into
+// initialIntroduction if the caller still has them on the contact object.
+function ensureInitialIntroduction(contact) {
+  const intro = (contact.initialIntroduction || '').trim();
+  if (intro) return intro;
+  const legacyParts = [
+    (contact.howMet || '').trim(),
+    (contact.howHelp || '').trim(),
+    (contact.topics || '').trim(),
+  ].filter(Boolean);
+  return legacyParts.join(' / ');
+}
+
 // Translate a contact from local app shape into the DB row shape.
 function toDb(contact, userId) {
+  const { firstName, lastName } = ensureSplitName(contact);
+  const initialIntroduction = ensureInitialIntroduction(contact);
+
   const row = {
     user_id: userId,
-    name: contact.name || '',
+    first_name: firstName,
+    last_name: lastName,
     company: contact.company || '',
     role: contact.role || '',
-    email: contact.email || '',
-    phone: contact.phone || '',
-    how_we_met: contact.howMet || '',
-    how_i_can_help: contact.howHelp || '',
+    initial_introduction: initialIntroduction,
     notes: contact.notes || '',
     last_contacted_at: contact.lastContacted || null,
     tags: contact.tags || [],
@@ -88,8 +126,6 @@ function toDb(contact, userId) {
     photo_url: contact.photo || '',
     archived: !!contact.archived,
     extra: {
-      linkedin: contact.linkedin || '',
-      topics: contact.topics || '',
       birthday: contact.birthday || '',
       timezone: contact.timezone || '',
       location: contact.location || '',
@@ -102,7 +138,10 @@ function toDb(contact, userId) {
       experience: contact.experience || '',
       pastCompanies: contact.pastCompanies || [],
       convLog: contact.convLog || [],
-      // New fields.
+      customFollowUpDate: contact.customFollowUpDate || '',
+      freqStartedAt: contact.freqStartedAt || '',
+      freqDayOfWeek:
+        typeof contact.freqDayOfWeek === 'number' ? contact.freqDayOfWeek : null,
       phones: Array.isArray(contact.phones) ? contact.phones : [],
       emails: Array.isArray(contact.emails) ? contact.emails : [],
       addresses: Array.isArray(contact.addresses) ? contact.addresses : [],
@@ -140,8 +179,6 @@ export async function fetchContacts() {
   return (data || []).map(fromDb);
 }
 
-// Sync a full local contacts array to Supabase.
-// Figures out what to insert, update, or delete by comparing IDs.
 // Returns true if a contact is a "sample" — local-only, never synced to
 // Supabase. Sample IDs start with 'sample_' (per constants.js getSampleContacts).
 // We also fence on isSample as a belt-and-suspenders check.
@@ -149,6 +186,8 @@ function isSampleContact(c) {
   return !!(c && (c.isSample || (typeof c.id === 'string' && c.id.startsWith('sample_'))));
 }
 
+// Sync a full local contacts array to Supabase.
+// Figures out what to insert, update, or delete by comparing IDs.
 export async function syncContacts(localContacts, userId) {
   if (!userId) return { ok: false, message: 'Not signed in' };
 

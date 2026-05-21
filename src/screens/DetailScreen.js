@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import {
   View,
   Text,
@@ -9,6 +9,8 @@ import {
   ActivityIndicator,
   Modal,
   Platform,
+  TextInput,
+  KeyboardAvoidingView,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useTheme } from '../styles/theme';
@@ -22,6 +24,7 @@ import {
   XIcon,
   MailIcon,
 } from '../components/Icons';
+import ConvLog from '../components/ConvLog';
 import {
   nextDate,
   daysUntil,
@@ -36,26 +39,22 @@ import {
 } from '../utils/helpers';
 import {
   FREQ,
-  TOUCH_TYPES,
   TEMPLATE_TYPES,
   getPrimaryPhone,
   getPrimaryEmail,
+  getDisplayName,
   formatFlexibleDate,
 } from '../constants';
-import { aiMeetingPrep, aiBackground, aiTemplate, aiExtractMeetingNote } from '../utils/ai';
+import { aiMeetingPrep, aiBackground, aiTemplate, aiAnswerQuestion } from '../utils/ai';
 import * as ImagePicker from 'expo-image-picker';
 import * as FileSystem from 'expo-file-system';
 import * as Sharing from 'expo-sharing';
 
-// Cross-platform confirm helper. Alert.alert is iOS/Android only; on web
-// it silently no-ops. window.confirm works on web. This wrapper picks the
-// right flow per platform so destructive actions actually fire.
 function confirmAction(title, message, onConfirm, confirmLabel = 'OK') {
   if (Platform.OS === 'web') {
     if (typeof window !== 'undefined' && window.confirm) {
       if (window.confirm(message || title)) onConfirm();
     } else {
-      // Fallback if window.confirm is somehow unavailable: just run.
       onConfirm();
     }
     return;
@@ -79,11 +78,15 @@ export default function DetailScreen({
   consumeAiCall,
   aiRemaining,
   effectiveTier,
+  myCard,
+  meetingSummaryLength,
 }) {
   const { theme } = useTheme();
   const insets = useSafeAreaInsets();
 
   if (!contact) return null;
+
+  const displayName = getDisplayName(contact);
 
   const nd = nextDate(contact.lastContacted, contact.freq, contact.freqStartedAt, contact.freqDayOfWeek);
   const ndDiff = nd ? daysUntil(nd) : null;
@@ -141,7 +144,7 @@ export default function DetailScreen({
   async function exportVcf() {
     try {
       const vcf = makeVcf(contact);
-      const filename = (contact.name || 'contact').replace(/\s+/g, '_') + '.vcf';
+      const filename = (displayName || 'contact').replace(/\s+/g, '_') + '.vcf';
       const path = FileSystem.cacheDirectory + filename;
       await FileSystem.writeAsStringAsync(path, vcf);
       if (await Sharing.isAvailableAsync()) {
@@ -154,7 +157,7 @@ export default function DetailScreen({
 
   function logToday() {
     onUpdate({ ...contact, lastContacted: isoToday() });
-    showToast('Logged contact with ' + contact.name);
+    showToast('Logged contact with ' + displayName);
   }
 
   const QBtn = ({ label, onPress, gold }) => (
@@ -237,7 +240,7 @@ export default function DetailScreen({
                   flexShrink: 1,
                 }}
               >
-                {contact.name}
+                {displayName}
               </Text>
               {contact.priority && (
                 <View
@@ -301,10 +304,11 @@ export default function DetailScreen({
           consumeAiCall={consumeAiCall}
           aiRemaining={aiRemaining}
           effectiveTier={effectiveTier}
+          onUpdate={onUpdate}
         />
 
         {/* Contact Methods */}
-        {(phones.length > 0 || emails.length > 0 || contact.linkedin) && (
+        {(phones.length > 0 || emails.length > 0) && (
           <View style={{ marginBottom: 18 }}>
             {phones.map((p, i) => (
               <ContactMethodRow
@@ -322,39 +326,19 @@ export default function DetailScreen({
                 onPress={e.value ? () => Linking.openURL('mailto:' + e.value) : null}
               />
             ))}
-            {contact.linkedin ? (
-              <ContactMethodRow
-                label="LinkedIn"
-                value={contact.linkedin.replace(/https?:\/\/(www\.)?linkedin\.com\/in\//, '')}
-                onPress={() =>
-                  Linking.openURL(
-                    contact.linkedin.startsWith('http')
-                      ? contact.linkedin
-                      : 'https://linkedin.com/in/' + contact.linkedin,
-                  )
-                }
-              />
-            ) : null}
           </View>
         )}
 
-        {/* Other context fields */}
-        <View style={{ flexDirection: 'row', flexWrap: 'wrap', marginHorizontal: -7, marginBottom: 18 }}>
-          {contact.howMet ? <DRow label="How We Met" value={contact.howMet} /> : null}
-          {contact.howHelp ? <DRow label="How I Can Help" value={contact.howHelp} /> : null}
-          {contact.lastContacted ? (() => {
-            const d = daysSince(contact.lastContacted);
-            const suffix = d <= 0 ? 'today' : d === 1 ? 'yesterday' : d + 'd ago';
-            return (
-              <DRow
-                label="Last Contacted"
-                value={fmtDate(contact.lastContacted) + ' (' + suffix + ')'}
-              />
-            );
-          })() : null}
-          {contact.location ? <DRow label="Location" value={contact.location} /> : null}
-          {contact.timezone ? <DRow label="Timezone" value={contact.timezone} /> : null}
-        </View>
+        {/* Other context */}
+        {(contact.initialIntroduction || contact.location || contact.timezone) ? (
+          <View style={{ flexDirection: 'row', flexWrap: 'wrap', marginHorizontal: -7, marginBottom: 18 }}>
+            {contact.initialIntroduction ? (
+              <DRow label="Initial Introduction" value={contact.initialIntroduction} />
+            ) : null}
+            {contact.location ? <DRow label="Location" value={contact.location} /> : null}
+            {contact.timezone ? <DRow label="Timezone" value={contact.timezone} /> : null}
+          </View>
+        ) : null}
 
         {/* Addresses */}
         {hasAddresses && (
@@ -393,25 +377,36 @@ export default function DetailScreen({
           </View>
         )}
 
-        {/* Mailing Lists */}
-        {showMailingLists && (
-          <MailingListsBlock
-            theme={theme}
-            availableLists={availableLists}
-            contactLists={contactLists}
-            onToggle={(listId) => onToggleContactOnList && onToggleContactOnList(contact, listId)}
-            contactName={contact.name}
-            showToast={showToast}
-          />
-        )}
-
-        {/* Follow-up Schedule — always shown. Tap to set/change frequency
-            inline without going to edit screen. */}
+        {/* Follow-up Schedule */}
         <FollowUpSchedule contact={contact} onUpdate={onUpdate} theme={theme} />
 
-        {contact.topics ? (
-          <DetailBlock label="Key Topics" content={contact.topics} />
-        ) : null}
+        {/* Contact Log */}
+        <View style={{ borderTopWidth: 1, borderTopColor: theme.brd, paddingTop: 16, marginBottom: 16 }}>
+          <Text
+            style={{
+              fontSize: 10,
+              fontWeight: '700',
+              color: theme.t4,
+              letterSpacing: 0.6,
+              textTransform: 'uppercase',
+              marginBottom: 12,
+            }}
+          >
+            Contact Log
+          </Text>
+          <ConvLog
+            contact={contact}
+            onUpdate={onUpdate}
+            showToast={showToast}
+            consumeAiCall={consumeAiCall}
+            allowImport
+            displayName={displayName}
+            myCard={myCard}
+            meetingSummaryLength={meetingSummaryLength}
+          />
+        </View>
+
+        {/* Notes (manual only, AI never writes here) */}
         {contact.notes ? <DetailBlock label="Notes" content={contact.notes} /> : null}
 
         {/* Background */}
@@ -533,27 +528,17 @@ export default function DetailScreen({
           </View>
         )}
 
-        {/* Conversation Log */}
-        <View style={{ borderTopWidth: 1, borderTopColor: theme.brd, paddingTop: 16, marginBottom: 16 }}>
-          <Text
-            style={{
-              fontSize: 10,
-              fontWeight: '700',
-              color: theme.t4,
-              letterSpacing: 0.6,
-              textTransform: 'uppercase',
-              marginBottom: 12,
-            }}
-          >
-            Contact Log
-          </Text>
-          <ConvLog
-            contact={contact}
-            onUpdate={onUpdate}
+        {/* Mailing Lists */}
+        {showMailingLists && (
+          <MailingListsBlock
+            theme={theme}
+            availableLists={availableLists}
+            contactLists={contactLists}
+            onToggle={(listId) => onToggleContactOnList && onToggleContactOnList(contact, listId)}
+            contactName={displayName}
             showToast={showToast}
-            consumeAiCall={consumeAiCall}
           />
-        </View>
+        )}
 
         {/* Templates */}
         <Templates
@@ -591,10 +576,10 @@ export default function DetailScreen({
             onPress={() =>
               confirmAction(
                 'Archive',
-                'Archive ' + contact.name + '?',
+                'Archive ' + displayName + '?',
                 () => {
                   onArchive();
-                  showToast(contact.name + ' archived', theme.warn);
+                  showToast(displayName + ' archived', theme.warn);
                 },
                 'Archive',
               )
@@ -619,7 +604,7 @@ export default function DetailScreen({
             onPress={() =>
               confirmAction(
                 'Delete',
-                'Permanently delete ' + contact.name + '? This cannot be undone.',
+                'Permanently delete ' + displayName + '? This cannot be undone.',
                 onDelete,
                 'Delete',
               )
@@ -737,7 +722,6 @@ function MailingListsBlock({ theme, availableLists, contactLists, onToggle, cont
 
 function ListPickerModal({ visible, onClose, availableLists, contactLists, onToggle, contactName }) {
   const { theme } = useTheme();
-  const insets = useSafeAreaInsets();
   const onIds = new Set(contactLists.map((l) => l.id));
 
   return (
@@ -986,25 +970,29 @@ function DetailBlock({ label, content }) {
   );
 }
 
-function AIPanel({ contact, consumeAiCall, aiRemaining, effectiveTier }) {
+// ============================================================
+// AI panel: Meeting Prep / Background / Ask AI
+// ============================================================
+function AIPanel({ contact, consumeAiCall, aiRemaining, effectiveTier, onUpdate }) {
   const { theme } = useTheme();
-  const [mode, setMode] = useState(null);
   const [result, setResult] = useState('');
   const [loading, setLoading] = useState(false);
+  const [askOpen, setAskOpen] = useState(false);
+  const [bgExpanded, setBgExpanded] = useState(false);
+  const [bgLoading, setBgLoading] = useState(false);
+  const [bgError, setBgError] = useState('');
 
-  async function run(type) {
-    // Gate behind tier — bails out and triggers paywall if free user is at cap.
+  const savedBackground = contact.aiBackgroundSummary || '';
+
+  async function runPrep() {
     if (consumeAiCall) {
       const allowed = await consumeAiCall('ai_limit_reached');
       if (!allowed) return;
     }
-    setMode(type);
     setResult('');
     setLoading(true);
     try {
-      let r = '';
-      if (type === 'prep') r = await aiMeetingPrep(contact);
-      else if (type === 'background') r = await aiBackground(contact);
+      const r = await aiMeetingPrep(contact);
       setResult(r);
     } catch (_) {
       setResult('Failed to generate. Try again.');
@@ -1012,9 +1000,37 @@ function AIPanel({ contact, consumeAiCall, aiRemaining, effectiveTier }) {
     setLoading(false);
   }
 
-  const Btn = ({ label, type, color, bgColor, brdColor }) => (
+  async function generateBackground() {
+    if (consumeAiCall) {
+      const allowed = await consumeAiCall('ai_limit_reached');
+      if (!allowed) return;
+    }
+    setBgLoading(true);
+    setBgError('');
+    try {
+      const r = await aiBackground(contact);
+      if (onUpdate) {
+        onUpdate({ ...contact, aiBackgroundSummary: r, aiBackgroundUpdatedAt: Date.now() });
+      }
+      setBgExpanded(true);
+    } catch (_) {
+      setBgError('Failed to generate. Try again.');
+    }
+    setBgLoading(false);
+  }
+
+  function onBackgroundButtonPress() {
+    if (bgLoading) return;
+    if (savedBackground) {
+      setBgExpanded((e) => !e);
+    } else {
+      generateBackground();
+    }
+  }
+
+  const Btn = ({ label, onPress, color, bgColor, brdColor }) => (
     <TouchableOpacity
-      onPress={() => run(type)}
+      onPress={onPress}
       style={{
         flex: 1,
         paddingVertical: 10,
@@ -1032,10 +1048,28 @@ function AIPanel({ contact, consumeAiCall, aiRemaining, effectiveTier }) {
   return (
     <View style={{ marginBottom: 14, gap: 8 }}>
       <View style={{ flexDirection: 'row', gap: 6 }}>
-        <Btn label="Meeting Prep" type="prep" color={theme.ac} bgColor={theme.bgAc} brdColor={theme.brdAc} />
-        <Btn label="Background" type="background" color={theme.ac} bgColor={theme.bgAc} brdColor={theme.brdAc} />
+        <Btn
+          label="Meeting Prep"
+          onPress={runPrep}
+          color={theme.ac}
+          bgColor={theme.bgAc}
+          brdColor={theme.brdAc}
+        />
+        <Btn
+          label="Background"
+          onPress={onBackgroundButtonPress}
+          color={theme.ac}
+          bgColor={theme.bgAc}
+          brdColor={theme.brdAc}
+        />
+        <Btn
+          label="Ask AI"
+          onPress={() => setAskOpen(true)}
+          color={theme.purp}
+          bgColor={theme.purp + '15'}
+          brdColor={theme.purp + '50'}
+        />
       </View>
-      {/* AI counter, only shown to free users (not Pro/trial). */}
       {effectiveTier === 'free' && Number.isFinite(aiRemaining) ? (
         <Text style={{ fontSize: 10, color: theme.t6, marginTop: -2 }}>
           {aiRemaining} of 5 AI calls remaining this month
@@ -1063,11 +1097,398 @@ function AIPanel({ contact, consumeAiCall, aiRemaining, effectiveTier }) {
           )}
         </View>
       )}
+
+      {(savedBackground || bgLoading || bgError) ? (
+        <View
+          style={{
+            backgroundColor: theme.bg2,
+            borderRadius: 14,
+            borderWidth: 1,
+            borderColor: theme.brd,
+            overflow: 'hidden',
+          }}
+        >
+          <TouchableOpacity
+            onPress={() => savedBackground && !bgLoading && setBgExpanded((e) => !e)}
+            activeOpacity={savedBackground && !bgLoading ? 0.7 : 1}
+            style={{
+              flexDirection: 'row',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              padding: 14,
+            }}
+          >
+            <Text style={{ fontSize: 13, color: theme.t1, fontWeight: '600' }}>
+              Background
+            </Text>
+            {bgLoading ? (
+              <ActivityIndicator color={theme.ac} size="small" />
+            ) : savedBackground ? (
+              <View style={{ transform: [{ rotate: bgExpanded ? '180deg' : '0deg' }] }}>
+                <ChevronDown size={14} color={theme.t5} />
+              </View>
+            ) : null}
+          </TouchableOpacity>
+          {bgLoading && !savedBackground ? (
+            <View style={{ paddingHorizontal: 14, paddingBottom: 14 }}>
+              <Text style={{ color: theme.ac, fontSize: 12, fontWeight: '600' }}>
+                Generating...
+              </Text>
+            </View>
+          ) : null}
+          {!bgLoading && bgError && !savedBackground ? (
+            <View style={{ paddingHorizontal: 14, paddingBottom: 14 }}>
+              <Text style={{ color: theme.warn, fontSize: 12 }}>{bgError}</Text>
+            </View>
+          ) : null}
+          {savedBackground && bgExpanded && !bgLoading ? (
+            <View style={{ paddingHorizontal: 14, paddingBottom: 14, gap: 10 }}>
+              <MarkdownText text={savedBackground} theme={theme} />
+              {bgError ? (
+                <Text style={{ color: theme.warn, fontSize: 11 }}>{bgError}</Text>
+              ) : null}
+              <TouchableOpacity
+                onPress={generateBackground}
+                style={{
+                  alignSelf: 'flex-start',
+                  paddingHorizontal: 12,
+                  paddingVertical: 8,
+                  borderRadius: 10,
+                  borderWidth: 1,
+                  borderColor: theme.brdAc,
+                  backgroundColor: theme.bgAc,
+                }}
+              >
+                <Text style={{ color: theme.ac, fontSize: 11, fontWeight: '600' }}>
+                  Update with AI
+                </Text>
+              </TouchableOpacity>
+            </View>
+          ) : null}
+        </View>
+      ) : null}
+
+      <AskAIModal
+        visible={askOpen}
+        onClose={() => setAskOpen(false)}
+        contact={contact}
+        consumeAiCall={consumeAiCall}
+      />
     </View>
   );
 }
 
-// ----- Lightweight markdown renderer for AI output -----
+// ============================================================
+// Ask AI modal: chat-style Q&A about the contact
+//
+// Chat history is local to this modal instance. Closing wipes it,
+// per spec. Each user message = 1 AI call against quota.
+// ============================================================
+function AskAIModal({ visible, onClose, contact, consumeAiCall }) {
+  const { theme } = useTheme();
+  const insets = useSafeAreaInsets();
+  const [messages, setMessages] = useState([]);
+  const [input, setInput] = useState('');
+  const [loading, setLoading] = useState(false);
+  const scrollRef = useRef(null);
+  const displayName = getDisplayName(contact);
+
+  // Wipe chat whenever the modal opens. "Fresh chat each open."
+  useEffect(() => {
+    if (visible) {
+      setMessages([]);
+      setInput('');
+      setLoading(false);
+    }
+  }, [visible]);
+
+  function scrollToBottom() {
+    setTimeout(() => {
+      if (scrollRef.current) {
+        scrollRef.current.scrollToEnd({ animated: true });
+      }
+    }, 50);
+  }
+
+  async function send() {
+    const trimmed = input.trim();
+    if (!trimmed || loading) return;
+    if (consumeAiCall) {
+      const allowed = await consumeAiCall('ai_limit_reached');
+      if (!allowed) return;
+    }
+    const historyBeforeSend = messages;
+    const userMsg = { role: 'user', content: trimmed };
+    setMessages([...historyBeforeSend, userMsg]);
+    setInput('');
+    setLoading(true);
+    scrollToBottom();
+    try {
+      const reply = await aiAnswerQuestion(contact, historyBeforeSend, trimmed);
+      setMessages((prev) => [...prev, { role: 'assistant', content: reply }]);
+    } catch (e) {
+      setMessages((prev) => [
+        ...prev,
+        { role: 'assistant', content: 'Sorry, that failed. Try again.' },
+      ]);
+    }
+    setLoading(false);
+    scrollToBottom();
+  }
+
+  const suggestionPrompts = [
+    'When did we last talk?',
+    'What does ' + (displayName.split(' ')[0] || 'this person') + ' care about?',
+    'What should I follow up on?',
+    'Any open commitments?',
+  ];
+
+  return (
+    <Modal
+      visible={visible}
+      transparent
+      animationType="slide"
+      onRequestClose={onClose}
+    >
+      <KeyboardAvoidingView
+        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+        style={{ flex: 1 }}
+      >
+        <View
+          style={{
+            flex: 1,
+            backgroundColor: 'rgba(0,0,0,0.5)',
+            justifyContent: 'flex-end',
+          }}
+        >
+          <View
+            style={{
+              backgroundColor: theme.bg,
+              borderTopLeftRadius: 22,
+              borderTopRightRadius: 22,
+              borderTopWidth: 1,
+              borderLeftWidth: 1,
+              borderRightWidth: 1,
+              borderColor: theme.brd,
+              height: '88%',
+              flexDirection: 'column',
+              overflow: 'hidden',
+            }}
+          >
+            {/* Header */}
+            <View
+              style={{
+                flexDirection: 'row',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                paddingHorizontal: 18,
+                paddingTop: 16,
+                paddingBottom: 12,
+                borderBottomWidth: 1,
+                borderBottomColor: theme.brd,
+              }}
+            >
+              <View style={{ flex: 1 }}>
+                <Text
+                  style={{
+                    fontSize: 17,
+                    color: theme.t1,
+                    fontWeight: '600',
+                    fontFamily: theme.fontDisplay,
+                  }}
+                >
+                  Ask AI about {displayName.split(' ')[0] || 'this contact'}
+                </Text>
+                <Text style={{ fontSize: 11, color: theme.t5, marginTop: 2 }}>
+                  AI uses everything saved on this contact card
+                </Text>
+              </View>
+              <TouchableOpacity onPress={onClose} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+                <XIcon size={20} color={theme.t4} />
+              </TouchableOpacity>
+            </View>
+
+            {/* Messages */}
+            <ScrollView
+              ref={scrollRef}
+              style={{ flex: 1 }}
+              contentContainerStyle={{
+                paddingHorizontal: 16,
+                paddingVertical: 14,
+                gap: 10,
+              }}
+              keyboardShouldPersistTaps="handled"
+            >
+              {messages.length === 0 && !loading ? (
+                <View style={{ paddingVertical: 24, alignItems: 'center', gap: 12 }}>
+                  <View
+                    style={{
+                      width: 48,
+                      height: 48,
+                      borderRadius: 24,
+                      backgroundColor: theme.purp + '20',
+                      borderWidth: 1,
+                      borderColor: theme.purp + '50',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                    }}
+                  >
+                    <ChatIcon size={22} color={theme.purp} />
+                  </View>
+                  <Text
+                    style={{
+                      fontSize: 13,
+                      color: theme.t4,
+                      textAlign: 'center',
+                      lineHeight: 19,
+                      paddingHorizontal: 20,
+                    }}
+                  >
+                    Ask anything about {displayName.split(' ')[0] || 'this contact'}.{'\n'}
+                    Past conversations, personal details, follow-ups.
+                  </Text>
+                  <View style={{ width: '100%', gap: 6, marginTop: 8 }}>
+                    {suggestionPrompts.map((p) => (
+                      <TouchableOpacity
+                        key={p}
+                        onPress={() => setInput(p)}
+                        activeOpacity={0.7}
+                        style={{
+                          paddingVertical: 10,
+                          paddingHorizontal: 14,
+                          borderRadius: 12,
+                          borderWidth: 1,
+                          borderColor: theme.brd2,
+                          backgroundColor: theme.bg2,
+                        }}
+                      >
+                        <Text style={{ fontSize: 12, color: theme.t3 }}>{p}</Text>
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+                </View>
+              ) : null}
+
+              {messages.map((m, i) => (
+                <ChatBubble key={i} role={m.role} content={m.content} theme={theme} />
+              ))}
+
+              {loading && (
+                <View
+                  style={{
+                    alignSelf: 'flex-start',
+                    backgroundColor: theme.bg2,
+                    borderWidth: 1,
+                    borderColor: theme.brd,
+                    paddingVertical: 10,
+                    paddingHorizontal: 14,
+                    borderRadius: 14,
+                    flexDirection: 'row',
+                    alignItems: 'center',
+                    gap: 8,
+                  }}
+                >
+                  <ActivityIndicator color={theme.purp} size="small" />
+                  <Text style={{ fontSize: 12, color: theme.t4 }}>Thinking...</Text>
+                </View>
+              )}
+            </ScrollView>
+
+            {/* Input */}
+            <View
+              style={{
+                paddingHorizontal: 14,
+                paddingTop: 10,
+                paddingBottom: Math.max(insets.bottom, 12),
+                borderTopWidth: 1,
+                borderTopColor: theme.brd,
+                backgroundColor: theme.bg,
+                flexDirection: 'row',
+                alignItems: 'flex-end',
+                gap: 8,
+              }}
+            >
+              <TextInput
+                value={input}
+                onChangeText={setInput}
+                placeholder="Ask anything..."
+                placeholderTextColor={theme.t6}
+                multiline
+                style={{
+                  flex: 1,
+                  backgroundColor: theme.bg2,
+                  borderWidth: 1,
+                  borderColor: theme.brd2,
+                  borderRadius: 18,
+                  color: theme.t1,
+                  paddingHorizontal: 14,
+                  paddingVertical: 10,
+                  fontSize: 14,
+                  maxHeight: 100,
+                  minHeight: 40,
+                  fontFamily: theme.fontBody,
+                }}
+              />
+              <TouchableOpacity
+                onPress={send}
+                disabled={!input.trim() || loading}
+                activeOpacity={0.7}
+                style={{
+                  width: 40,
+                  height: 40,
+                  borderRadius: 20,
+                  backgroundColor: theme.purp,
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  opacity: !input.trim() || loading ? 0.4 : 1,
+                }}
+              >
+                <Text style={{ color: '#fff', fontSize: 18, fontWeight: '700', marginTop: -2 }}>
+                  ↑
+                </Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </KeyboardAvoidingView>
+    </Modal>
+  );
+}
+
+function ChatBubble({ role, content, theme }) {
+  const isUser = role === 'user';
+  return (
+    <View
+      style={{
+        alignSelf: isUser ? 'flex-end' : 'flex-start',
+        maxWidth: '85%',
+        backgroundColor: isUser ? theme.purp : theme.bg2,
+        borderWidth: isUser ? 0 : 1,
+        borderColor: theme.brd,
+        paddingVertical: 10,
+        paddingHorizontal: 14,
+        borderRadius: 16,
+        borderBottomRightRadius: isUser ? 4 : 16,
+        borderBottomLeftRadius: isUser ? 16 : 4,
+      }}
+    >
+      {isUser ? (
+        <Text
+          style={{
+            fontSize: 14,
+            color: '#fff',
+            lineHeight: 20,
+            fontFamily: theme.fontBody,
+          }}
+        >
+          {content}
+        </Text>
+      ) : (
+        <MarkdownText text={content} theme={theme} />
+      )}
+    </View>
+  );
+}
 
 function MarkdownText({ text, theme }) {
   if (!text) return null;
@@ -1153,867 +1574,6 @@ function renderInline(text, theme) {
     }
     return part;
   });
-}
-
-// ----- Conversation Log component with Add Note + Import Notes flows -----
-
-function ConvLog({ contact, onUpdate, showToast, consumeAiCall }) {
-  const { theme } = useTheme();
-  const [note, setNote] = useState('');
-  const [adding, setAdding] = useState(false);
-  const [importing, setImporting] = useState(false);
-  const [touchType, setTouchType] = useState('call');
-  // Track which entries are expanded. Most recent stays open by default.
-  const [expandedIds, setExpandedIds] = useState(() => new Set());
-  // Transcript modal state
-  const [transcriptModal, setTranscriptModal] = useState(null); // entry object or null
-  const log = contact.convLog || [];
-
-  function toggleExpanded(id) {
-    setExpandedIds((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-  }
-
-  function add() {
-    if (!note.trim()) return;
-    const entry = {
-      id: String(Date.now()),
-      date: isoToday(),
-      text: note.trim(),
-      type: touchType,
-    };
-    onUpdate({ ...contact, convLog: [entry, ...log], lastContacted: entry.date });
-    setNote('');
-    setAdding(false);
-    setTouchType('call');
-  }
-
-  function getType(t) {
-    return TOUCH_TYPES.find((x) => x.v === t) || TOUCH_TYPES[5];
-  }
-
-  function handleImportSave(extracted, date, type, rawTranscript) {
-    const entry = {
-      id: String(Date.now()),
-      date: date || isoToday(),
-      text: extracted,
-      type: type || 'meeting',
-    };
-    if (rawTranscript && rawTranscript.trim()) {
-      entry.rawTranscript = rawTranscript.trim();
-    }
-    onUpdate({ ...contact, convLog: [entry, ...log], lastContacted: entry.date });
-    setImporting(false);
-    showToast && showToast('Note imported');
-  }
-
-  // Build a one-line preview for collapsed entries.
-  function preview(text) {
-    if (!text) return '';
-    const oneLine = text.replace(/\s+/g, ' ').trim();
-    return oneLine.length > 80 ? oneLine.slice(0, 80).trim() + '...' : oneLine;
-  }
-
-  return (
-    <View>
-      <View
-        style={{
-          flexDirection: 'row',
-          justifyContent: 'flex-end',
-          marginBottom: 10,
-        }}
-      >
-        <TouchableOpacity
-          onPress={() => {
-            setAdding((a) => !a);
-            setImporting(false);
-          }}
-          style={{
-            paddingHorizontal: 14,
-            paddingVertical: 5,
-            borderRadius: 10,
-            borderWidth: 1,
-            backgroundColor: adding ? theme.bgRed : theme.bgAc,
-            borderColor: adding ? '#3A1838' : theme.brdAc,
-          }}
-        >
-          <Text
-            style={{
-              color: adding ? theme.pink : theme.ac,
-              fontSize: 11,
-              fontWeight: '600',
-            }}
-          >
-            {adding ? 'Cancel' : '+ Add Note'}
-          </Text>
-        </TouchableOpacity>
-      </View>
-
-      {adding && (
-        <View style={{ marginBottom: 14 }}>
-          <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 4, marginBottom: 10 }}>
-            {TOUCH_TYPES.map((tt) => (
-              <TouchableOpacity
-                key={tt.v}
-                onPress={() => setTouchType(tt.v)}
-                style={{
-                  paddingHorizontal: 10,
-                  paddingVertical: 6,
-                  borderRadius: 8,
-                  borderWidth: 1,
-                  backgroundColor: touchType === tt.v ? tt.c + '22' : theme.bg3,
-                  borderColor: touchType === tt.v ? tt.c : theme.brd,
-                }}
-              >
-                <Text
-                  style={{
-                    color: touchType === tt.v ? tt.c : theme.t5,
-                    fontSize: 11,
-                    fontWeight: '600',
-                  }}
-                >
-                  {tt.l}
-                </Text>
-              </TouchableOpacity>
-            ))}
-          </View>
-
-          {/* Paste Transcript: opens the AI extraction flow. Sits below the
-              touch-type row so it's clearly secondary to typing a note. */}
-          <TouchableOpacity
-            onPress={() => {
-              setImporting(true);
-              setAdding(false);
-            }}
-            style={{
-              flexDirection: 'row',
-              alignItems: 'center',
-              justifyContent: 'center',
-              gap: 6,
-              paddingVertical: 8,
-              paddingHorizontal: 12,
-              borderRadius: 10,
-              borderWidth: 1,
-              borderStyle: 'dashed',
-              borderColor: theme.brd2,
-              backgroundColor: 'transparent',
-              marginBottom: 10,
-              alignSelf: 'flex-start',
-            }}
-          >
-            <Text style={{ color: theme.info, fontSize: 11, fontWeight: '600' }}>
-              📋 Paste Transcript
-            </Text>
-          </TouchableOpacity>
-
-          <TextInputBox value={note} onChangeText={setNote} placeholder="What did you discuss?" />
-          <TouchableOpacity
-            onPress={add}
-            style={{
-              backgroundColor: theme.ac,
-              paddingVertical: 10,
-              paddingHorizontal: 20,
-              borderRadius: 12,
-              alignItems: 'center',
-              marginTop: 8,
-            }}
-          >
-            <Text style={{ color: '#fff', fontSize: 12, fontWeight: '700' }}>Save Note</Text>
-          </TouchableOpacity>
-        </View>
-      )}
-
-      <ImportNotesModal
-        visible={importing}
-        onClose={() => setImporting(false)}
-        contact={contact}
-        onSave={handleImportSave}
-        consumeAiCall={consumeAiCall}
-      />
-
-      {log.length === 0 && !adding ? (
-        <Text style={{ fontSize: 12, color: theme.t6 }}>
-          No notes yet. Tap + Add Note after a conversation, or paste a meeting transcript.
-        </Text>
-      ) : null}
-      {log.map((e, i) => {
-        const tt = getType(e.type);
-        // Expand by default if it's the most recent entry, OR if user toggled it open.
-        const isExpanded = (i === 0 && !expandedIds.has(`__collapsed:${e.id}`)) || expandedIds.has(e.id);
-        const hasTranscript = !!(e.rawTranscript && e.rawTranscript.trim());
-
-        return (
-          <LogEntry
-            key={e.id}
-            entry={e}
-            tt={tt}
-            isFirst={i === 0}
-            isExpanded={isExpanded}
-            hasTranscript={hasTranscript}
-            previewText={preview(e.text)}
-            adding={adding}
-            theme={theme}
-            onToggle={() => {
-              // For the default-open most recent, we use a sentinel key to remember "user collapsed it"
-              if (i === 0 && !expandedIds.has(e.id) && !expandedIds.has(`__collapsed:${e.id}`)) {
-                // Default-open and being collapsed: store the sentinel
-                setExpandedIds((prev) => {
-                  const next = new Set(prev);
-                  next.add(`__collapsed:${e.id}`);
-                  return next;
-                });
-                return;
-              }
-              if (i === 0 && expandedIds.has(`__collapsed:${e.id}`)) {
-                // Default-open was collapsed, now reopening: clear sentinel
-                setExpandedIds((prev) => {
-                  const next = new Set(prev);
-                  next.delete(`__collapsed:${e.id}`);
-                  return next;
-                });
-                return;
-              }
-              toggleExpanded(e.id);
-            }}
-            onDelete={() =>
-              onUpdate({ ...contact, convLog: log.filter((x) => x.id !== e.id) })
-            }
-            onViewTranscript={() => setTranscriptModal(e)}
-          />
-        );
-      })}
-
-      <TranscriptModal
-        entry={transcriptModal}
-        onClose={() => setTranscriptModal(null)}
-      />
-    </View>
-  );
-}
-
-// ----- A single conversation log entry, collapsible -----
-
-function LogEntry({
-  entry,
-  tt,
-  isFirst,
-  isExpanded,
-  hasTranscript,
-  previewText,
-  adding,
-  theme,
-  onToggle,
-  onDelete,
-  onViewTranscript,
-}) {
-  return (
-    <View
-      style={{
-        borderTopWidth: isFirst && !adding ? 0 : 1,
-        borderTopColor: theme.brd,
-        paddingTop: isFirst && !adding ? 0 : 10,
-        marginTop: isFirst && !adding ? 0 : 10,
-      }}
-    >
-      <TouchableOpacity
-        onPress={onToggle}
-        activeOpacity={0.6}
-        style={{
-          flexDirection: 'row',
-          justifyContent: 'space-between',
-          alignItems: 'center',
-          paddingVertical: 4,
-        }}
-      >
-        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, flex: 1 }}>
-          <Text style={{ fontSize: 10, color: tt.c, fontWeight: '600' }}>{tt.l}</Text>
-          <Text style={{ fontSize: 10, color: theme.t6 }}>{fmtDate(entry.date)}</Text>
-          {hasTranscript ? (
-            <View
-              style={{
-                paddingHorizontal: 5,
-                paddingVertical: 1,
-                borderRadius: 4,
-                backgroundColor: theme.bg3,
-                borderWidth: 1,
-                borderColor: theme.brd,
-              }}
-            >
-              <Text style={{ fontSize: 8, color: theme.t5, fontWeight: '700', letterSpacing: 0.3 }}>
-                T
-              </Text>
-            </View>
-          ) : null}
-        </View>
-        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-          <View style={{ transform: [{ rotate: isExpanded ? '180deg' : '0deg' }] }}>
-            <ChevronDown size={12} color={theme.t5} />
-          </View>
-          {isExpanded ? (
-            <TouchableOpacity
-              onPress={onDelete}
-              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-            >
-              <XIcon size={14} color={theme.t6} />
-            </TouchableOpacity>
-          ) : null}
-        </View>
-      </TouchableOpacity>
-
-      {!isExpanded ? (
-        <TouchableOpacity onPress={onToggle} activeOpacity={0.6}>
-          <Text
-            style={{
-              fontSize: 12,
-              color: theme.t5,
-              lineHeight: 17,
-              marginTop: 2,
-              marginBottom: 2,
-            }}
-            numberOfLines={1}
-          >
-            {previewText}
-          </Text>
-        </TouchableOpacity>
-      ) : (
-        <View style={{ marginTop: 4 }}>
-          <Text style={{ fontSize: 13, color: theme.t3, lineHeight: 21 }}>{entry.text}</Text>
-          {hasTranscript ? (
-            <TouchableOpacity
-              onPress={onViewTranscript}
-              style={{
-                marginTop: 8,
-                alignSelf: 'flex-start',
-                paddingHorizontal: 10,
-                paddingVertical: 5,
-                borderRadius: 8,
-                borderWidth: 1,
-                borderColor: theme.brd2,
-                backgroundColor: theme.bg2,
-              }}
-            >
-              <Text style={{ fontSize: 11, color: theme.info, fontWeight: '600' }}>
-                View transcript
-              </Text>
-            </TouchableOpacity>
-          ) : null}
-        </View>
-      )}
-    </View>
-  );
-}
-
-// ----- Modal for viewing the raw transcript of an entry -----
-
-function TranscriptModal({ entry, onClose }) {
-  const { theme } = useTheme();
-  const visible = !!entry;
-  const transcript = entry?.rawTranscript || '';
-
-  return (
-    <Modal
-      visible={visible}
-      transparent
-      animationType="fade"
-      onRequestClose={onClose}
-    >
-      <TouchableOpacity
-        activeOpacity={1}
-        onPress={onClose}
-        style={{
-          flex: 1,
-          backgroundColor: 'rgba(0,0,0,0.5)',
-          justifyContent: 'center',
-          alignItems: 'center',
-          padding: 20,
-        }}
-      >
-        <TouchableOpacity
-          activeOpacity={1}
-          onPress={() => {}}
-          style={{
-            backgroundColor: theme.bg,
-            borderRadius: 18,
-            borderWidth: 1,
-            borderColor: theme.brd,
-            padding: 18,
-            width: '100%',
-            maxWidth: 600,
-            maxHeight: '85%',
-          }}
-        >
-          <View
-            style={{
-              flexDirection: 'row',
-              justifyContent: 'space-between',
-              alignItems: 'center',
-              marginBottom: 6,
-            }}
-          >
-            <Text
-              style={{
-                fontSize: 16,
-                color: theme.t1,
-                fontWeight: '600',
-                fontFamily: theme.fontDisplay,
-              }}
-            >
-              Transcript
-            </Text>
-            <TouchableOpacity onPress={onClose}>
-              <XIcon size={18} color={theme.t4} />
-            </TouchableOpacity>
-          </View>
-          <Text style={{ fontSize: 11, color: theme.t5, marginBottom: 12 }}>
-            {entry ? fmtDate(entry.date) : ''}
-          </Text>
-
-          <ScrollView style={{ maxHeight: 480 }}>
-            <Text
-              style={{
-                fontSize: 12,
-                color: theme.t3,
-                lineHeight: 19,
-                fontFamily: theme.fontBody,
-              }}
-            >
-              {transcript || 'No transcript saved for this entry.'}
-            </Text>
-          </ScrollView>
-
-          <TouchableOpacity
-            onPress={onClose}
-            style={{
-              marginTop: 12,
-              paddingVertical: 11,
-              borderRadius: 12,
-              backgroundColor: theme.ac,
-              alignItems: 'center',
-            }}
-          >
-            <Text style={{ color: '#fff', fontSize: 13, fontWeight: '700' }}>Close</Text>
-          </TouchableOpacity>
-        </TouchableOpacity>
-      </TouchableOpacity>
-    </Modal>
-  );
-}
-
-// ----- Import Notes modal -----
-//
-// User pastes raw meeting content (Granola export, Otter transcript,
-// Zoom AI summary, anything). On Extract, calls aiExtractMeetingNote
-// which returns a clean summary. User can review/edit before saving.
-// The original raw paste is also saved as rawTranscript on the entry
-// so it can be viewed later.
-
-// Heuristic: does the AI's extracted summary indicate the conversation
-// wasn't actually about this contact? When that's true we surface a
-// confirmation dialog instead of silently saving an unhelpful log entry.
-//
-// We check the first ~200 chars to keep this snappy. Phrases here are based
-// on common ways Claude flags off-topic transcripts.
-function summaryFlagsAsIrrelevant(summary, contactName) {
-  if (!summary) return false;
-  const head = summary.slice(0, 280).toLowerCase();
-  const phrases = [
-    'not relevant',
-    'no mention of',
-    "doesn't mention",
-    'does not mention',
-    'should not be logged',
-    'nothing to log',
-    'nothing here should be logged',
-    'no relevant content',
-    'not about',
-  ];
-  if (phrases.some((p) => head.includes(p))) return true;
-
-  // Also flag if the contact's first name appears nowhere in the full summary
-  // AND the summary is short enough that this is a meaningful signal.
-  // Skip this check for very long summaries, since the contact is probably mentioned somewhere.
-  if (contactName && summary.length < 400) {
-    const firstName = contactName.trim().split(/\s+/)[0];
-    if (firstName && firstName.length >= 3) {
-      const re = new RegExp(`\\b${firstName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i');
-      if (!re.test(summary)) return true;
-    }
-  }
-
-  return false;
-}
-
-function ImportNotesModal({ visible, onClose, contact, onSave, consumeAiCall }) {
-  const { theme } = useTheme();
-  const [raw, setRaw] = useState('');
-  const [extracted, setExtracted] = useState('');
-  const [date, setDate] = useState(isoToday());
-  const [type, setType] = useState('meeting');
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState('');
-  // When the AI's output looks irrelevant to this contact, hold the result
-  // here and show a confirmation card instead of dropping it straight into
-  // the editable box. Stays as a string (not boolean) so we can populate
-  // the editable summary if the user picks "Save anyway".
-  const [pendingIrrelevant, setPendingIrrelevant] = useState('');
-
-  function reset() {
-    setRaw('');
-    setExtracted('');
-    setDate(isoToday());
-    setType('meeting');
-    setLoading(false);
-    setError('');
-    setPendingIrrelevant('');
-  }
-
-  function handleClose() {
-    reset();
-    onClose();
-  }
-
-  async function extract() {
-    if (!raw.trim()) return;
-    if (consumeAiCall) {
-      const allowed = await consumeAiCall('ai_limit_reached');
-      if (!allowed) return;
-    }
-    setLoading(true);
-    setError('');
-    setPendingIrrelevant('');
-    try {
-      const result = await aiExtractMeetingNote(contact, raw);
-      // If the extraction looks like the AI is flagging the transcript as
-      // irrelevant to this contact, surface a confirmation card instead of
-      // populating the editable box. Avoids the user having to read garbage
-      // text just to figure out whether to save or cancel.
-      if (summaryFlagsAsIrrelevant(result, contact?.name)) {
-        setPendingIrrelevant(result);
-        setExtracted('');
-      } else {
-        setExtracted(result);
-      }
-    } catch (e) {
-      setError('Failed to extract. Try again.');
-    }
-    setLoading(false);
-  }
-
-  function confirmIrrelevant() {
-    // User chose "Save anyway" — populate the editable box and clear the warning.
-    setExtracted(pendingIrrelevant);
-    setPendingIrrelevant('');
-  }
-
-  function cancelIrrelevant() {
-    // User chose "Cancel" — drop the irrelevant summary, leave the raw paste in place.
-    setPendingIrrelevant('');
-    setExtracted('');
-  }
-
-  function save() {
-    if (!extracted.trim()) return;
-    // Pass the raw paste as rawTranscript so it can be viewed later.
-    onSave(extracted.trim(), date, type, raw);
-    reset();
-  }
-
-  return (
-    <Modal
-      visible={visible}
-      transparent
-      animationType="fade"
-      onRequestClose={handleClose}
-    >
-      <TouchableOpacity
-        activeOpacity={1}
-        onPress={handleClose}
-        style={{
-          flex: 1,
-          backgroundColor: 'rgba(0,0,0,0.5)',
-          justifyContent: 'center',
-          alignItems: 'center',
-          padding: 20,
-        }}
-      >
-        <TouchableOpacity
-          activeOpacity={1}
-          onPress={() => {}}
-          style={{
-            backgroundColor: theme.bg,
-            borderRadius: 18,
-            borderWidth: 1,
-            borderColor: theme.brd,
-            width: '100%',
-            maxWidth: 520,
-            maxHeight: '85%',
-            flexDirection: 'column',
-            overflow: 'hidden',
-          }}
-        >
-          {/* Header (fixed) */}
-          <View style={{ paddingHorizontal: 18, paddingTop: 18, paddingBottom: 8 }}>
-            <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
-              <Text style={{ fontSize: 16, color: theme.t1, fontWeight: '600', fontFamily: theme.fontDisplay }}>
-                Import Notes
-              </Text>
-              <TouchableOpacity onPress={handleClose}>
-                <XIcon size={18} color={theme.t4} />
-              </TouchableOpacity>
-            </View>
-            <Text style={{ fontSize: 11, color: theme.t5, lineHeight: 17 }}>
-              Input transcript from Granola, Otter, Fireflies, Fathom, Zoom AI Companion, Read.ai, tl;dv, or any other meeting note tool.
-            </Text>
-          </View>
-
-          {/* Scrollable body */}
-          <ScrollView
-            style={{ flexShrink: 1 }}
-            contentContainerStyle={{ paddingHorizontal: 18, paddingTop: 8, paddingBottom: 12 }}
-            keyboardShouldPersistTaps="handled"
-          >
-            {/* Date + type pickers */}
-            <View style={{ flexDirection: 'row', gap: 8, marginBottom: 12 }}>
-              <View style={{ flex: 1 }}>
-                <Text style={{ fontSize: 10, fontWeight: '700', color: theme.t5, letterSpacing: 0.4, textTransform: 'uppercase', marginBottom: 4 }}>
-                  Date
-                </Text>
-                <TextInputBox
-                  value={date}
-                  onChangeText={setDate}
-                  placeholder="YYYY-MM-DD"
-                  small
-                />
-              </View>
-              <View style={{ flex: 2 }}>
-                <Text style={{ fontSize: 10, fontWeight: '700', color: theme.t5, letterSpacing: 0.4, textTransform: 'uppercase', marginBottom: 4 }}>
-                  Type
-                </Text>
-                <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 4 }}>
-                  {TOUCH_TYPES.map((tt) => (
-                    <TouchableOpacity
-                      key={tt.v}
-                      onPress={() => setType(tt.v)}
-                      style={{
-                        paddingHorizontal: 8,
-                        paddingVertical: 5,
-                        borderRadius: 8,
-                        borderWidth: 1,
-                        backgroundColor: type === tt.v ? tt.c + '22' : theme.bg3,
-                        borderColor: type === tt.v ? tt.c : theme.brd,
-                      }}
-                    >
-                      <Text style={{ color: type === tt.v ? tt.c : theme.t5, fontSize: 10, fontWeight: '600' }}>
-                        {tt.l}
-                      </Text>
-                    </TouchableOpacity>
-                  ))}
-                </View>
-              </View>
-            </View>
-
-            {/* Raw paste area */}
-            <Text style={{ fontSize: 10, fontWeight: '700', color: theme.t5, letterSpacing: 0.4, textTransform: 'uppercase', marginBottom: 4 }}>
-              Paste full transcript for best results
-            </Text>
-            <TextInputBox
-              value={raw}
-              onChangeText={setRaw}
-              placeholder="Paste transcript here..."
-              tall
-            />
-
-            {error ? (
-              <Text style={{ color: theme.red, fontSize: 12, marginTop: 8 }}>{error}</Text>
-            ) : null}
-
-            {/* Irrelevance confirmation card */}
-            {pendingIrrelevant ? (
-              <View
-                style={{
-                  marginTop: 14,
-                  padding: 14,
-                  borderRadius: 12,
-                  borderWidth: 1,
-                  borderColor: theme.warn + '60',
-                  backgroundColor: theme.warn + '15',
-                }}
-              >
-                <Text
-                  style={{
-                    fontSize: 12,
-                    fontWeight: '700',
-                    color: theme.warn,
-                    marginBottom: 6,
-                  }}
-                >
-                  Possibly off-topic
-                </Text>
-                <Text style={{ fontSize: 12, color: theme.t3, lineHeight: 18, marginBottom: 12 }}>
-                  Are you sure this conversation is relevant to {contact?.name || 'this contact'}? Claude's summary suggests it may not be about them.
-                </Text>
-                <View style={{ flexDirection: 'row', gap: 8 }}>
-                  <TouchableOpacity
-                    onPress={cancelIrrelevant}
-                    style={{
-                      flex: 1,
-                      paddingVertical: 10,
-                      borderRadius: 10,
-                      borderWidth: 1,
-                      borderColor: theme.brd2,
-                      backgroundColor: theme.bg,
-                      alignItems: 'center',
-                    }}
-                  >
-                    <Text style={{ color: theme.t3, fontSize: 12, fontWeight: '600' }}>
-                      Cancel
-                    </Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity
-                    onPress={confirmIrrelevant}
-                    style={{
-                      flex: 1,
-                      paddingVertical: 10,
-                      borderRadius: 10,
-                      backgroundColor: theme.warn,
-                      alignItems: 'center',
-                    }}
-                  >
-                    <Text style={{ color: '#fff', fontSize: 12, fontWeight: '700' }}>
-                      Save anyway
-                    </Text>
-                  </TouchableOpacity>
-                </View>
-              </View>
-            ) : null}
-
-            {/* Extracted preview (only shown after extraction) */}
-            {extracted ? (
-              <View style={{ marginTop: 14 }}>
-                <Text style={{ fontSize: 10, fontWeight: '700', color: theme.ac, letterSpacing: 0.4, textTransform: 'uppercase', marginBottom: 4 }}>
-                  Extracted summary (edit if needed)
-                </Text>
-                <TextInputBox
-                  value={extracted}
-                  onChangeText={setExtracted}
-                  placeholder="Extracted summary"
-                  tall
-                />
-                <Text style={{ fontSize: 10, color: theme.t6, marginTop: 6, fontStyle: 'italic' }}>
-                  Original transcript will be saved with this entry. Tap "View transcript" later to see it.
-                </Text>
-              </View>
-            ) : null}
-          </ScrollView>
-
-          {/* Pinned footer with action buttons */}
-          <View
-            style={{
-              paddingHorizontal: 18,
-              paddingTop: 12,
-              paddingBottom: 18,
-              borderTopWidth: 1,
-              borderTopColor: theme.brd,
-              backgroundColor: theme.bg,
-            }}
-          >
-            {!extracted ? (
-              <TouchableOpacity
-                onPress={extract}
-                disabled={!raw.trim() || loading}
-                style={{
-                  backgroundColor: theme.ac,
-                  paddingVertical: 12,
-                  borderRadius: 12,
-                  alignItems: 'center',
-                  opacity: !raw.trim() || loading ? 0.5 : 1,
-                }}
-              >
-                {loading ? (
-                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-                    <ActivityIndicator color="#fff" size="small" />
-                    <Text style={{ color: '#fff', fontSize: 13, fontWeight: '700' }}>
-                      Extracting...
-                    </Text>
-                  </View>
-                ) : (
-                  <Text style={{ color: '#fff', fontSize: 13, fontWeight: '700' }}>
-                    Extract with Claude
-                  </Text>
-                )}
-              </TouchableOpacity>
-            ) : (
-              <View style={{ flexDirection: 'row', gap: 8 }}>
-                <TouchableOpacity
-                  onPress={extract}
-                  disabled={loading}
-                  style={{
-                    flex: 1,
-                    paddingVertical: 12,
-                    borderRadius: 12,
-                    borderWidth: 1,
-                    borderColor: theme.brd2,
-                    backgroundColor: theme.bg2,
-                    alignItems: 'center',
-                    opacity: loading ? 0.5 : 1,
-                  }}
-                >
-                  <Text style={{ color: theme.t3, fontSize: 12, fontWeight: '600' }}>
-                    Re-extract
-                  </Text>
-                </TouchableOpacity>
-                <TouchableOpacity
-                  onPress={save}
-                  style={{
-                    flex: 2,
-                    paddingVertical: 12,
-                    borderRadius: 12,
-                    backgroundColor: theme.ac,
-                    alignItems: 'center',
-                  }}
-                >
-                  <Text style={{ color: '#fff', fontSize: 13, fontWeight: '700' }}>
-                    Save to Log
-                  </Text>
-                </TouchableOpacity>
-              </View>
-            )}
-          </View>
-        </TouchableOpacity>
-      </TouchableOpacity>
-    </Modal>
-  );
-}
-
-function TextInputBox({ value, onChangeText, placeholder, small, tall }) {
-  const { theme } = useTheme();
-  const { TextInput } = require('react-native');
-  return (
-    <TextInput
-      value={value}
-      onChangeText={onChangeText}
-      placeholder={placeholder}
-      placeholderTextColor={theme.t6}
-      multiline={!small}
-      style={{
-        backgroundColor: theme.bg2,
-        borderWidth: 1,
-        borderColor: theme.brd2,
-        borderRadius: 12,
-        color: theme.t1,
-        paddingHorizontal: 14,
-        paddingVertical: 10,
-        fontSize: 13,
-        minHeight: small ? 38 : tall ? 140 : 60,
-        textAlignVertical: 'top',
-        fontFamily: theme.fontBody,
-      }}
-    />
-  );
 }
 
 function Templates({ contact, consumeAiCall, aiRemaining, effectiveTier }) {
@@ -2123,11 +1683,6 @@ function Templates({ contact, consumeAiCall, aiRemaining, effectiveTier }) {
   );
 }
 
-// FollowUpSchedule — inline frequency picker on the contact detail screen.
-// Always rendered. Two states:
-//   - Has frequency: shows current freq + next contact + day-of-week (weekly)
-//   - No frequency: shows "+ Set frequency" button + helper copy
-// Tap any value (or the Set button) to expand the inline picker.
 function FollowUpSchedule({ contact, onUpdate, theme }) {
   const [editing, setEditing] = useState(false);
   const freq = contact.freq;
@@ -2139,10 +1694,11 @@ function FollowUpSchedule({ contact, onUpdate, theme }) {
     contact.freqDayOfWeek != null
       ? DAYS_OF_WEEK[contact.freqDayOfWeek]?.l
       : null;
+  const customFollowUp = contact.customFollowUpDate
+    ? formatFlexibleDate(contact.customFollowUpDate)
+    : '';
+  const hasAnySchedule = hasFreq || !!customFollowUp;
 
-  // Set or change the frequency. Stamps freqStartedAt the first time so
-  // the contact starts showing in Next Up immediately, and defaults
-  // freqDayOfWeek to today's day when picking weekly without a prior pick.
   function pickFreq(v) {
     const update = { ...contact, freq: v };
     if (v && v !== 'never') {
@@ -2170,13 +1726,12 @@ function FollowUpSchedule({ contact, onUpdate, theme }) {
         marginBottom: 14,
       }}
     >
-      {/* Header row: title + action button on the right */}
       <View
         style={{
           flexDirection: 'row',
           alignItems: 'center',
           justifyContent: 'space-between',
-          marginBottom: hasFreq || editing ? 10 : 4,
+          marginBottom: hasAnySchedule || editing ? 10 : 4,
         }}
       >
         <Text
@@ -2190,7 +1745,7 @@ function FollowUpSchedule({ contact, onUpdate, theme }) {
         >
           Follow-up Schedule
         </Text>
-        {!hasFreq && !editing ? (
+        {!hasAnySchedule && !editing ? (
           <TouchableOpacity
             onPress={() => setEditing(true)}
             style={{
@@ -2206,7 +1761,7 @@ function FollowUpSchedule({ contact, onUpdate, theme }) {
               + Set frequency
             </Text>
           </TouchableOpacity>
-        ) : hasFreq && !editing ? (
+        ) : hasAnySchedule && !editing ? (
           <TouchableOpacity
             onPress={() => setEditing(true)}
             style={{
@@ -2241,22 +1796,22 @@ function FollowUpSchedule({ contact, onUpdate, theme }) {
         )}
       </View>
 
-      {/* Empty-state copy when no frequency set and not editing */}
-      {!hasFreq && !editing && (
+      {!hasAnySchedule && !editing && (
         <Text style={{ fontSize: 12, color: theme.t6 }}>
           No follow-up schedule yet.
         </Text>
       )}
 
-      {/* Display rows when freq is set and not editing */}
-      {hasFreq && !editing && (
+      {hasAnySchedule && !editing && (
         <>
-          <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 4 }}>
-            <Text style={{ fontSize: 12, color: theme.t5 }}>Frequency</Text>
-            <Text style={{ fontSize: 12, color: theme.t2, fontWeight: '500' }}>
-              {fl ? fl.l : ''}
-            </Text>
-          </View>
+          {hasFreq && (
+            <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 4 }}>
+              <Text style={{ fontSize: 12, color: theme.t5 }}>Frequency</Text>
+              <Text style={{ fontSize: 12, color: theme.t2, fontWeight: '500' }}>
+                {fl ? fl.l : ''}
+              </Text>
+            </View>
+          )}
           {dayLabel && (
             <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 4 }}>
               <Text style={{ fontSize: 12, color: theme.t5 }}>Day</Text>
@@ -2266,7 +1821,7 @@ function FollowUpSchedule({ contact, onUpdate, theme }) {
             </View>
           )}
           {nd && (
-            <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
+            <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: customFollowUp ? 4 : 0 }}>
               <Text style={{ fontSize: 12, color: theme.t5 }}>Next contact</Text>
               <Text
                 style={{
@@ -2285,10 +1840,17 @@ function FollowUpSchedule({ contact, onUpdate, theme }) {
               </Text>
             </View>
           )}
+          {customFollowUp ? (
+            <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
+              <Text style={{ fontSize: 12, color: theme.t5 }}>One-off follow-up</Text>
+              <Text style={{ fontSize: 12, color: theme.gold, fontWeight: '600' }}>
+                {customFollowUp}
+              </Text>
+            </View>
+          ) : null}
         </>
       )}
 
-      {/* Inline picker when editing */}
       {editing && (
         <View style={{ gap: 10 }}>
           <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6 }}>
@@ -2321,7 +1883,6 @@ function FollowUpSchedule({ contact, onUpdate, theme }) {
             })}
           </View>
 
-          {/* Day-of-week picker for weekly */}
           {freq === '1week' && (
             <View>
               <Text
@@ -2368,7 +1929,6 @@ function FollowUpSchedule({ contact, onUpdate, theme }) {
             </View>
           )}
 
-          {/* Show the next contact preview live so the user sees the impact */}
           {nd && (
             <View
               style={{
@@ -2391,6 +1951,10 @@ function FollowUpSchedule({ contact, onUpdate, theme }) {
               </Text>
             </View>
           )}
+
+          <Text style={{ fontSize: 10, color: theme.t6, fontStyle: 'italic' }}>
+            To set a one-off custom follow-up date, use the full Edit screen.
+          </Text>
         </View>
       )}
     </View>

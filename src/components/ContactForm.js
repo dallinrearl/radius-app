@@ -1,4 +1,4 @@
-import React, { useEffect } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   View,
   Text,
@@ -19,6 +19,11 @@ import {
   emptyPhone,
   emptyEmail,
   emptyAddress,
+  getDisplayName,
+  TAG_GROUPS,
+  TAG_COLORS,
+  CUSTOM_TAG_COLORS,
+  getTagLabel,
 } from '../constants';
 import {
   fmtPhone,
@@ -40,10 +45,11 @@ import {
   Toggle,
   BackButton,
 } from './Common';
-import { TagSelector, InterestSelector } from './Selectors';
+import { InterestSelector } from './Selectors';
 import { CityInput, CompanyInput } from './Typeahead';
 import { DownloadIcon, XIcon } from './Icons';
 import DateInput from './DateInput';
+import ConvLog from './ConvLog';
 import * as FileSystem from 'expo-file-system';
 import * as Sharing from 'expo-sharing';
 
@@ -53,6 +59,14 @@ function moveItem(arr, from, to) {
   const [item] = next.splice(from, 1);
   next.splice(to, 0, item);
   return next;
+}
+
+function colorForTag(v) {
+  if (!v) return '#888';
+  if (TAG_COLORS[v]) return TAG_COLORS[v];
+  let h = 0;
+  for (let i = 0; i < v.length; i++) h = (h * 31 + v.charCodeAt(i)) >>> 0;
+  return CUSTOM_TAG_COLORS[h % CUSTOM_TAG_COLORS.length];
 }
 
 export default function ContactForm({
@@ -78,11 +92,69 @@ export default function ContactForm({
   const nd = nextDate(form.lastContacted, form.freq, form.freqStartedAt, form.freqDayOfWeek);
   const ndDiff = nd ? daysUntil(nd) : null;
 
+  const [addressesExpanded, setAddressesExpanded] = useState(false);
+  const [customDateOpen, setCustomDateOpen] = useState(false);
+  const [newTagDraft, setNewTagDraft] = useState('');
+
   // ---------- One-time form normalization on open ----------
   useEffect(() => {
     setForm((f) => {
       const next = { ...f };
       let changed = false;
+
+      if (typeof next.firstName !== 'string') {
+        next.firstName = '';
+        changed = true;
+      }
+      if (typeof next.lastName !== 'string') {
+        next.lastName = '';
+        changed = true;
+      }
+      if (!next.firstName && !next.lastName && typeof next.name === 'string' && next.name.trim()) {
+        const trimmed = next.name.trim();
+        const idx = trimmed.indexOf(' ');
+        if (idx < 0) {
+          next.firstName = trimmed;
+        } else {
+          next.firstName = trimmed.slice(0, idx);
+          next.lastName = trimmed.slice(idx + 1).trim();
+        }
+        changed = true;
+      }
+
+      if (typeof next.initialIntroduction !== 'string') {
+        next.initialIntroduction = typeof next.howMet === 'string' ? next.howMet : '';
+        changed = true;
+      }
+      if ('howMet' in next) {
+        delete next.howMet;
+        changed = true;
+      }
+      if ('howHelp' in next) {
+        delete next.howHelp;
+        changed = true;
+      }
+      if ('topics' in next) {
+        delete next.topics;
+        changed = true;
+      }
+      if ('linkedin' in next) {
+        delete next.linkedin;
+        changed = true;
+      }
+
+      if (typeof next.customFollowUpDate !== 'string') {
+        next.customFollowUpDate = '';
+        changed = true;
+      }
+      if (typeof next.notes !== 'string') {
+        next.notes = '';
+        changed = true;
+      }
+      if (!Array.isArray(next.convLog)) {
+        next.convLog = [];
+        changed = true;
+      }
 
       if (!Array.isArray(next.phones)) {
         next.phones = [];
@@ -114,18 +186,12 @@ export default function ContactForm({
         next.addresses = [];
         changed = true;
       }
-      if (!next.id && next.addresses.length === 0) {
-        next.addresses = [emptyAddress()];
-        changed = true;
-      }
 
       if (!Array.isArray(next.mailingLists)) {
         next.mailingLists = [];
         changed = true;
       }
 
-      // Migrate legacy birthday/anniversary strings to date objects.
-      // Leaves objects untouched. Empty strings become null.
       if (typeof next.birthday === 'string') {
         next.birthday = parseLegacyDate(next.birthday);
         changed = true;
@@ -140,11 +206,101 @@ export default function ContactForm({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [form?.id]);
 
+  useEffect(() => {
+    if (Array.isArray(form.addresses) && form.addresses.length > 0) {
+      setAddressesExpanded(true);
+    }
+    if (form.customFollowUpDate) {
+      setCustomDateOpen(true);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [form?.id]);
+
   const phones = Array.isArray(form.phones) ? form.phones : [];
   const emails = Array.isArray(form.emails) ? form.emails : [];
   const addresses = Array.isArray(form.addresses) ? form.addresses : [];
   const formMailingLists = Array.isArray(form.mailingLists) ? form.mailingLists : [];
   const availableLists = Array.isArray(mailingLists) ? mailingLists : [];
+
+  const displayName = getDisplayName(form);
+
+  // Lookup sets for "is this a built-in tag?". We check both values
+  // ('investor') and display labels ('Investor', 'Family Office') because
+  // `allTags` from the store may contain either depending on how it was
+  // populated. Anything that matches a built-in by value OR by label is
+  // considered built-in and stays out of the Custom section.
+  const builtInTagValues = TAG_GROUPS.flatMap((g) => g.tags.map((t) => t.v));
+  const builtInTagValuesSet = new Set(builtInTagValues);
+  const builtInTagLabelsSet = new Set(
+    TAG_GROUPS.flatMap((g) => g.tags.map((t) => t.l)),
+  );
+  function isBuiltInTag(v) {
+    if (!v) return false;
+    return builtInTagValuesSet.has(v) || builtInTagLabelsSet.has(v);
+  }
+
+  const selectedTags = Array.isArray(form.tags) ? form.tags : [];
+  const customSelectedTags = selectedTags.filter((t) => !isBuiltInTag(t));
+  const knownCustomTags = (allTags || []).filter(
+    (t) => !isBuiltInTag(t) && !customSelectedTags.includes(t),
+  );
+
+  // Which subsection groups are expanded. Default: all collapsed.
+  // Selected chips live above the groups so users can see what they
+  // picked without expanding anything.
+  const [expandedTagGroups, setExpandedTagGroups] = useState(() => ({}));
+  function toggleTagGroup(key) {
+    setExpandedTagGroups((g) => ({ ...g, [key]: !g[key] }));
+  }
+  const [customExpanded, setCustomExpanded] = useState(false);
+
+  // Per-section "has data" flags. CollapsibleSection uses these as the
+  // initial open/closed state. Basic Info is always expanded because it
+  // anchors the form and the user needs to see name/company first.
+  const hasContactLogData = Array.isArray(form.convLog) && form.convLog.length > 0;
+  const hasNotesData = !!(form.notes && form.notes.trim());
+  const hasContactInfoData =
+    (Array.isArray(form.phones) && form.phones.some((p) => p && p.value && p.value.trim())) ||
+    (Array.isArray(form.emails) && form.emails.some((e) => e && e.value && e.value.trim()));
+  const hasTagsData = Array.isArray(form.tags) && form.tags.length > 0;
+  const hasAddressesData = Array.isArray(form.addresses) && form.addresses.length > 0;
+  const hasBackgroundData =
+    !!(form.experience && form.experience.trim()) ||
+    (Array.isArray(form.pastCompanies) &&
+      form.pastCompanies.some((pc) => (pc && pc.company && pc.company.trim()) || (pc && pc.role && pc.role.trim())));
+  const hasPersonalData =
+    !!form.hometown ||
+    !!form.location ||
+    !!form.timezone ||
+    !!form.married ||
+    !!form.spouseName ||
+    (form.birthday && !dateObjectIsEmpty(form.birthday)) ||
+    (form.anniversary && !dateObjectIsEmpty(form.anniversary)) ||
+    (Array.isArray(form.kids) && form.kids.length > 0) ||
+    (Array.isArray(form.interests) && form.interests.length > 0);
+  const hasMailingListsData =
+    (Array.isArray(form.mailingLists) && form.mailingLists.length > 0) ||
+    !!(form.recipientName && form.recipientName.trim());
+
+  function toggleTag(v) {
+    setForm((f) => ({
+      ...f,
+      tags: (f.tags || []).includes(v)
+        ? (f.tags || []).filter((x) => x !== v)
+        : [...(f.tags || []), v],
+    }));
+  }
+
+  function addNewCustomTag() {
+    const v = (newTagDraft || '').trim();
+    if (!v) return;
+    setNewTagDraft('');
+    if (onAddTag) onAddTag(v);
+    setForm((f) => ({
+      ...f,
+      tags: (f.tags || []).includes(v) ? f.tags : [...(f.tags || []), v],
+    }));
+  }
 
   function updatePhones(next) {
     setForm((f) => ({
@@ -173,10 +329,29 @@ export default function ContactForm({
     });
   }
 
+  function addFirstAddress() {
+    updateAddresses([emptyAddress()]);
+    setAddressesExpanded(true);
+  }
+
+  // Bridge ConvLog's onUpdate (expects a full contact-shaped object back)
+  // into setForm. ConvLog calls onUpdate({ ...contact, convLog, lastContacted })
+  // so we just replace the relevant fields on the form.
+  function applyConvLogUpdate(updatedContact) {
+    setForm((f) => ({
+      ...f,
+      convLog: updatedContact.convLog || [],
+      lastContacted:
+        typeof updatedContact.lastContacted === 'string'
+          ? updatedContact.lastContacted
+          : f.lastContacted,
+    }));
+  }
+
   async function exportVcf() {
     try {
       const vcf = makeVcf(form);
-      const filename = (form.name || 'contact').replace(/\s+/g, '_') + '.vcf';
+      const filename = (displayName || 'contact').replace(/\s+/g, '_') + '.vcf';
       const path = FileSystem.cacheDirectory + filename;
       await FileSystem.writeAsStringAsync(path, vcf);
       if (await Sharing.isAvailableAsync()) {
@@ -184,6 +359,31 @@ export default function ContactForm({
       }
     } catch (e) {
       Alert.alert('Export failed', e.message);
+    }
+  }
+
+  function pickFreq(v) {
+    setForm((f) => {
+      const next = { ...f, freq: v };
+      if (v && v !== 'never') {
+        if (!f.freqStartedAt) next.freqStartedAt = isoToday();
+        if (v === '1week' && f.freqDayOfWeek == null) {
+          next.freqDayOfWeek = new Date().getDay();
+        }
+      } else {
+        next.freqStartedAt = '';
+        next.freqDayOfWeek = null;
+      }
+      return next;
+    });
+  }
+
+  function toggleCustomDate() {
+    if (customDateOpen) {
+      setForm((f) => ({ ...f, customFollowUpDate: '' }));
+      setCustomDateOpen(false);
+    } else {
+      setCustomDateOpen(true);
     }
   }
 
@@ -233,14 +433,27 @@ export default function ContactForm({
         )}
 
         {/* Basic Info */}
-        <Section label="Basic Info">
-          <Field label="Full Name">
-            <StyledInput
-              value={form.name}
-              onChangeText={(v) => setForm((f) => ({ ...f, name: v }))}
-              placeholder="First Last"
-            />
-          </Field>
+        <CollapsibleSection label="Basic Info" hasData={true}>
+          <View style={{ flexDirection: 'row', gap: 8 }}>
+            <View style={{ flex: 1 }}>
+              <Field label="First Name">
+                <StyledInput
+                  value={form.firstName || ''}
+                  onChangeText={(v) => setForm((f) => ({ ...f, firstName: v }))}
+                  placeholder="First"
+                />
+              </Field>
+            </View>
+            <View style={{ flex: 1 }}>
+              <Field label="Last Name">
+                <StyledInput
+                  value={form.lastName || ''}
+                  onChangeText={(v) => setForm((f) => ({ ...f, lastName: v }))}
+                  placeholder="Last"
+                />
+              </Field>
+            </View>
+          </View>
           <Field label="Company">
             <CompanyInput
               value={form.company}
@@ -255,6 +468,146 @@ export default function ContactForm({
               placeholder="e.g. VP of Acquisitions"
             />
           </Field>
+
+          {!isMyCard && (
+            <>
+              <Field label="Initial Introduction">
+                <StyledInput
+                  value={form.initialIntroduction || ''}
+                  onChangeText={(v) => setForm((f) => ({ ...f, initialIntroduction: v }))}
+                  placeholder="e.g. ULI conference, referral from..."
+                />
+              </Field>
+
+              <Field label="Follow up">
+                <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6 }}>
+                  {FREQ.map((o) => {
+                    const on = form.freq === o.v;
+                    return (
+                      <TouchableOpacity
+                        key={o.v}
+                        onPress={() => pickFreq(o.v)}
+                        style={{
+                          paddingHorizontal: 12,
+                          paddingVertical: 8,
+                          borderRadius: 10,
+                          borderWidth: 1,
+                          backgroundColor: on ? theme.bgAc : theme.bg2,
+                          borderColor: on ? theme.ac : theme.brd2,
+                        }}
+                      >
+                        <Text
+                          style={{
+                            fontSize: 11,
+                            color: on ? theme.ac : theme.t5,
+                            fontWeight: '600',
+                          }}
+                        >
+                          {o.l}
+                        </Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                  <TouchableOpacity
+                    onPress={toggleCustomDate}
+                    style={{
+                      paddingHorizontal: 12,
+                      paddingVertical: 8,
+                      borderRadius: 10,
+                      borderWidth: 1,
+                      backgroundColor: customDateOpen ? theme.bgAc : theme.bg2,
+                      borderColor: customDateOpen ? theme.ac : theme.brd2,
+                    }}
+                  >
+                    <Text
+                      style={{
+                        fontSize: 11,
+                        color: customDateOpen ? theme.ac : theme.t5,
+                        fontWeight: '600',
+                      }}
+                    >
+                      Custom
+                    </Text>
+                  </TouchableOpacity>
+                </View>
+
+                {customDateOpen && (
+                  <View style={{ marginTop: 10 }}>
+                    <Text style={{ fontSize: 11, color: theme.t5, marginBottom: 6 }}>
+                      One-off follow-up date
+                    </Text>
+                    <DateInput
+                      value={parseLegacyDate(form.customFollowUpDate)}
+                      onChange={(v) => {
+                        if (!v || dateObjectIsEmpty(v)) {
+                          setForm((f) => ({ ...f, customFollowUpDate: '' }));
+                          return;
+                        }
+                        const mm = v.month != null ? String(v.month).padStart(2, '0') : '';
+                        const dd = v.day != null ? String(v.day).padStart(2, '0') : '';
+                        const yyyy = v.year != null ? String(v.year) : '';
+                        if (mm && dd && yyyy) {
+                          setForm((f) => ({ ...f, customFollowUpDate: `${yyyy}-${mm}-${dd}` }));
+                        } else if (mm && dd) {
+                          setForm((f) => ({ ...f, customFollowUpDate: `${mm}-${dd}` }));
+                        } else {
+                          setForm((f) => ({ ...f, customFollowUpDate: '' }));
+                        }
+                      }}
+                      requireYear
+                    />
+                  </View>
+                )}
+
+                {form.freq === '1week' && (
+                  <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 10 }}>
+                    {DAYS_OF_WEEK.map((d) => {
+                      const on = form.freqDayOfWeek === d.v;
+                      return (
+                        <TouchableOpacity
+                          key={d.v}
+                          onPress={() => setForm((f) => ({ ...f, freqDayOfWeek: d.v }))}
+                          style={{
+                            paddingHorizontal: 10,
+                            paddingVertical: 6,
+                            borderRadius: 8,
+                            borderWidth: 1,
+                            backgroundColor: on ? theme.bgAc : theme.bg3,
+                            borderColor: on ? theme.ac : theme.brd,
+                          }}
+                        >
+                          <Text
+                            style={{
+                              fontSize: 10,
+                              color: on ? theme.ac : theme.t5,
+                              fontWeight: '600',
+                            }}
+                          >
+                            {d.s}
+                          </Text>
+                        </TouchableOpacity>
+                      );
+                    })}
+                  </View>
+                )}
+              </Field>
+
+              {nd && (
+                <Text
+                  style={{
+                    fontSize: 12,
+                    color: ndDiff < 0 ? theme.red : ndDiff <= 7 ? theme.warn : theme.ac,
+                    marginTop: -8,
+                    marginBottom: 12,
+                  }}
+                >
+                  Next contact: {fmtDate(nd)} (
+                  {ndDiff < 0 ? Math.abs(ndDiff) + 'd overdue' : ndDiff + 'd from now'})
+                </Text>
+              )}
+            </>
+          )}
+
           {!isMyCard && (
             <View
               style={{
@@ -287,10 +640,43 @@ export default function ContactForm({
               />
             </View>
           )}
-        </Section>
+        </CollapsibleSection>
+
+        {/* Contact Log — manual entries + any pre-seeded entries (Granola etc.).
+            Paste-Transcript disabled here (allowImport=false) since the
+            primary route into the form's log is the Granola sync flow. */}
+        {!isMyCard && (
+          <CollapsibleSection
+            label="Contact Log"
+            hasData={hasContactLogData}
+            badge={hasContactLogData ? form.convLog.length : null}
+          >
+            <ConvLog
+              contact={form}
+              onUpdate={applyConvLogUpdate}
+              allowImport={false}
+              displayName={displayName}
+            />
+          </CollapsibleSection>
+        )}
+
+        {/* Notes — manual user input only. AI never writes here. */}
+        {!isMyCard && (
+          <CollapsibleSection label="Notes" hasData={hasNotesData}>
+            <Field>
+              <StyledInput
+                value={form.notes || ''}
+                onChangeText={(v) => setForm((f) => ({ ...f, notes: v }))}
+                placeholder="Context, follow-ups, anything else..."
+                multiline
+                style={{ minHeight: 80 }}
+              />
+            </Field>
+          </CollapsibleSection>
+        )}
 
         {/* Contact Info */}
-        <Section label="Contact Info">
+        <CollapsibleSection label="Contact Info" hasData={hasContactInfoData}>
           <Field label="Phones">
             {phones.map((p, i) => (
               <PhoneRow
@@ -340,267 +726,308 @@ export default function ContactForm({
               onPress={() => updateEmails([...emails, emptyEmail()])}
             />
           </Field>
+        </CollapsibleSection>
 
-          <Field label="LinkedIn">
-            <StyledInput
-              value={form.linkedin || ''}
-              onChangeText={(v) => setForm((f) => ({ ...f, linkedin: v }))}
-              placeholder="linkedin.com/in/username"
-              autoCapitalize="none"
-            />
-          </Field>
-        </Section>
-
-        {/* Addresses */}
-        <Section label="Addresses">
-          {addresses.map((a, i) => (
-            <AddressRow
-              key={`addr-${i}`}
-              theme={theme}
-              address={a}
-              index={i}
-              count={addresses.length}
-              onChange={(next) => {
-                const arr = [...addresses];
-                arr[i] = next;
-                updateAddresses(arr);
-              }}
-              onRemove={() => updateAddresses(addresses.filter((_, j) => j !== i))}
-              onMoveUp={() => updateAddresses(moveItem(addresses, i, i - 1))}
-              onMoveDown={() => updateAddresses(moveItem(addresses, i, i + 1))}
-            />
-          ))}
-          <AddRowButton
-            theme={theme}
-            label={addresses.length === 0 ? '+ Add address' : '+ Add another address'}
-            onPress={() => updateAddresses([...addresses, emptyAddress()])}
-          />
-
-          {addresses.length > 0 && (
-            <Field label="Recipient Name (for mailing labels)">
-              <StyledInput
-                value={form.recipientName || ''}
-                onChangeText={(v) => setForm((f) => ({ ...f, recipientName: v }))}
-                placeholder={form.name ? `Defaults to "${form.name}"` : 'e.g. The Smith Family'}
-              />
-            </Field>
-          )}
-        </Section>
-
-        {/* Mailing Lists */}
-        {!isMyCard && availableLists.length > 0 && (
-          <Section label="Mailing Lists">
-            <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6 }}>
-              {availableLists.map((list) => {
-                const on = formMailingLists.includes(list.id);
-                return (
-                  <TouchableOpacity
-                    key={list.id}
-                    onPress={() => toggleMailingList(list.id)}
-                    activeOpacity={0.7}
-                    style={{
-                      paddingHorizontal: 12,
-                      paddingVertical: 8,
-                      borderRadius: 20,
-                      borderWidth: 1,
-                      backgroundColor: on ? theme.bgAc : theme.bg2,
-                      borderColor: on ? theme.ac : theme.brd2,
-                    }}
-                  >
-                    <Text
-                      style={{
-                        fontSize: 12,
-                        color: on ? theme.ac : theme.t4,
-                        fontWeight: '600',
-                      }}
-                    >
-                      {list.name}
-                    </Text>
-                  </TouchableOpacity>
-                );
-              })}
-            </View>
-            {addresses.length === 0 && formMailingLists.length > 0 && (
-              <Text style={{ fontSize: 11, color: theme.warn, marginTop: 10, fontStyle: 'italic' }}>
-                Add an address above so this contact can be exported on the mailing label.
-              </Text>
-            )}
-          </Section>
-        )}
-
-        {/* Context (skipped on My Card) */}
+        {/* Tags */}
         {!isMyCard && (
-          <Section label="Context">
-            <Field label="How You Met">
-              <StyledInput
-                value={form.howMet}
-                onChangeText={(v) => setForm((f) => ({ ...f, howMet: v }))}
-                placeholder="e.g. ULI conference, referral from..."
-              />
-            </Field>
-            <Field label="How I Can Help">
-              <StyledInput
-                value={form.howHelp || ''}
-                onChangeText={(v) => setForm((f) => ({ ...f, howHelp: v }))}
-                placeholder="What value can you provide to this person?"
-                multiline
-              />
-            </Field>
-            <Field label="Last Contacted">
-              <StyledInput
-                value={form.lastContacted}
-                onChangeText={(v) => setForm((f) => ({ ...f, lastContacted: v }))}
-                placeholder="YYYY-MM-DD"
-              />
-            </Field>
-            <Field label="Follow-up Frequency">
-              <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6 }}>
-                {FREQ.map((o) => {
-                  const on = form.freq === o.v;
-                  return (
-                    <TouchableOpacity
-                      key={o.v}
-                      onPress={() =>
-                        setForm((f) => {
-                          const next = { ...f, freq: o.v };
-                          // When picking a real frequency for the first time,
-                          // stamp freqStartedAt so the contact appears in
-                          // Next Up even without prior log history. Also
-                          // default freqDayOfWeek to today so weekly users
-                          // get a sensible cadence anchor.
-                          if (o.v && o.v !== 'never') {
-                            if (!f.freqStartedAt) {
-                              next.freqStartedAt = isoToday();
-                            }
-                            if (o.v === '1week' && f.freqDayOfWeek == null) {
-                              next.freqDayOfWeek = new Date().getDay();
-                            }
-                          } else {
-                            // 'never' clears the schedule fields.
-                            next.freqStartedAt = '';
-                            next.freqDayOfWeek = null;
-                          }
-                          return next;
-                        })
-                      }
-                      style={{
-                        paddingHorizontal: 12,
-                        paddingVertical: 8,
-                        borderRadius: 10,
-                        borderWidth: 1,
-                        backgroundColor: on ? theme.bgAc : theme.bg2,
-                        borderColor: on ? theme.ac : theme.brd2,
-                      }}
-                    >
-                      <Text
-                        style={{
-                          fontSize: 11,
-                          color: on ? theme.ac : theme.t5,
-                          fontWeight: '600',
-                        }}
-                      >
-                        {o.l}
-                      </Text>
-                    </TouchableOpacity>
-                  );
-                })}
-              </View>
-
-              {/* Day-of-week picker, shown only for weekly cadence. Defaults
-                  to the day frequency was set on. */}
-              {form.freq === '1week' && (
-                <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 8 }}>
-                  {DAYS_OF_WEEK.map((d) => {
-                    const on = form.freqDayOfWeek === d.v;
+          <CollapsibleSection
+            label="Tags"
+            hasData={hasTagsData}
+            badge={hasTagsData ? selectedTags.length : null}
+          >
+            {/* Selected — pinned chips at the top of the Tags section.
+                Tap a chip to remove. Hidden if nothing is selected. */}
+            {selectedTags.length > 0 && (
+              <View
+                style={{
+                  marginBottom: 14,
+                  paddingBottom: 12,
+                  borderBottomWidth: 1,
+                  borderBottomColor: theme.brd,
+                }}
+              >
+                <Text
+                  style={{
+                    fontSize: 10,
+                    fontWeight: '700',
+                    color: theme.ac,
+                    letterSpacing: 0.5,
+                    textTransform: 'uppercase',
+                    marginBottom: 8,
+                  }}
+                >
+                  Selected
+                </Text>
+                <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6 }}>
+                  {selectedTags.map((v) => {
+                    const c = colorForTag(v);
                     return (
                       <TouchableOpacity
-                        key={d.v}
-                        onPress={() => setForm((f) => ({ ...f, freqDayOfWeek: d.v }))}
+                        key={`sel-${v}`}
+                        onPress={() => toggleTag(v)}
+                        activeOpacity={0.7}
                         style={{
-                          paddingHorizontal: 10,
-                          paddingVertical: 6,
-                          borderRadius: 8,
+                          flexDirection: 'row',
+                          alignItems: 'center',
+                          gap: 6,
+                          paddingHorizontal: 12,
+                          paddingVertical: 7,
+                          borderRadius: 20,
                           borderWidth: 1,
-                          backgroundColor: on ? theme.bgAc : theme.bg3,
-                          borderColor: on ? theme.ac : theme.brd,
+                          backgroundColor: c + '22',
+                          borderColor: c,
                         }}
                       >
-                        <Text
-                          style={{
-                            fontSize: 10,
-                            color: on ? theme.ac : theme.t5,
-                            fontWeight: '600',
-                          }}
-                        >
-                          {d.s}
+                        <Text style={{ fontSize: 12, color: c, fontWeight: '600' }}>
+                          {getTagLabel(v)}
                         </Text>
+                        <XIcon size={11} color={c} />
                       </TouchableOpacity>
                     );
                   })}
                 </View>
-              )}
-            </Field>
-            {nd && (
-              <Text
+              </View>
+            )}
+
+            {/* Built-in group subsections. Collapsed by default. */}
+            {TAG_GROUPS.map((group, gIdx) => {
+              const open = !!expandedTagGroups[group.key];
+              const selectedInGroup = group.tags.filter((t) =>
+                selectedTags.includes(t.v),
+              ).length;
+              return (
+                <View
+                  key={group.key}
+                  style={{ marginBottom: gIdx === TAG_GROUPS.length - 1 ? 4 : 10 }}
+                >
+                  <TouchableOpacity
+                    onPress={() => toggleTagGroup(group.key)}
+                    activeOpacity={0.7}
+                    style={{
+                      flexDirection: 'row',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      paddingVertical: 6,
+                    }}
+                  >
+                    <View
+                      style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}
+                    >
+                      <Text
+                        style={{
+                          fontSize: 11,
+                          fontWeight: '700',
+                          color: theme.t4,
+                          letterSpacing: 0.5,
+                          textTransform: 'uppercase',
+                        }}
+                      >
+                        {group.label}
+                      </Text>
+                      {selectedInGroup > 0 && (
+                        <View
+                          style={{
+                            paddingHorizontal: 6,
+                            paddingVertical: 1,
+                            borderRadius: 6,
+                            backgroundColor: theme.bgAc,
+                            borderWidth: 1,
+                            borderColor: theme.brdAc,
+                          }}
+                        >
+                          <Text
+                            style={{
+                              fontSize: 9,
+                              color: theme.ac,
+                              fontWeight: '700',
+                            }}
+                          >
+                            {selectedInGroup}
+                          </Text>
+                        </View>
+                      )}
+                    </View>
+                    <Text
+                      style={{ fontSize: 11, color: theme.t5, fontWeight: '600' }}
+                    >
+                      {open ? '▾' : '▸'}
+                    </Text>
+                  </TouchableOpacity>
+                  {open && (
+                    <View
+                      style={{
+                        flexDirection: 'row',
+                        flexWrap: 'wrap',
+                        gap: 6,
+                        marginTop: 6,
+                      }}
+                    >
+                      {group.tags.map((t) => {
+                        const on = selectedTags.includes(t.v);
+                        const c = colorForTag(t.v);
+                        return (
+                          <TouchableOpacity
+                            key={t.v}
+                            onPress={() => toggleTag(t.v)}
+                            activeOpacity={0.7}
+                            style={{
+                              paddingHorizontal: 12,
+                              paddingVertical: 7,
+                              borderRadius: 20,
+                              borderWidth: 1,
+                              backgroundColor: on ? c + '22' : 'transparent',
+                              borderColor: on ? c : theme.brd2,
+                            }}
+                          >
+                            <Text
+                              style={{
+                                fontSize: 12,
+                                color: on ? c : theme.t4,
+                                fontWeight: '600',
+                              }}
+                            >
+                              {t.l}
+                            </Text>
+                          </TouchableOpacity>
+                        );
+                      })}
+                    </View>
+                  )}
+                </View>
+              );
+            })}
+
+            {/* Custom subsection. Only shows if there ARE custom tags
+                (truly custom, not display-label collisions with built-ins).
+                Collapsible like the others. */}
+            {(customSelectedTags.length > 0 || knownCustomTags.length > 0) && (
+              <View style={{ marginTop: 4, marginBottom: 10 }}>
+                <TouchableOpacity
+                  onPress={() => setCustomExpanded((v) => !v)}
+                  activeOpacity={0.7}
+                  style={{
+                    flexDirection: 'row',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    paddingVertical: 6,
+                  }}
+                >
+                  <View
+                    style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}
+                  >
+                    <Text
+                      style={{
+                        fontSize: 11,
+                        fontWeight: '700',
+                        color: theme.t4,
+                        letterSpacing: 0.5,
+                        textTransform: 'uppercase',
+                      }}
+                    >
+                      Custom
+                    </Text>
+                    {customSelectedTags.length > 0 && (
+                      <View
+                        style={{
+                          paddingHorizontal: 6,
+                          paddingVertical: 1,
+                          borderRadius: 6,
+                          backgroundColor: theme.bgAc,
+                          borderWidth: 1,
+                          borderColor: theme.brdAc,
+                        }}
+                      >
+                        <Text
+                          style={{
+                            fontSize: 9,
+                            color: theme.ac,
+                            fontWeight: '700',
+                          }}
+                        >
+                          {customSelectedTags.length}
+                        </Text>
+                      </View>
+                    )}
+                  </View>
+                  <Text
+                    style={{ fontSize: 11, color: theme.t5, fontWeight: '600' }}
+                  >
+                    {customExpanded ? '▾' : '▸'}
+                  </Text>
+                </TouchableOpacity>
+                {customExpanded && (
+                  <View
+                    style={{
+                      flexDirection: 'row',
+                      flexWrap: 'wrap',
+                      gap: 6,
+                      marginTop: 6,
+                    }}
+                  >
+                    {[...customSelectedTags, ...knownCustomTags].map((v) => {
+                      const on = selectedTags.includes(v);
+                      const c = colorForTag(v);
+                      return (
+                        <TouchableOpacity
+                          key={v}
+                          onPress={() => toggleTag(v)}
+                          activeOpacity={0.7}
+                          style={{
+                            paddingHorizontal: 12,
+                            paddingVertical: 7,
+                            borderRadius: 20,
+                            borderWidth: 1,
+                            backgroundColor: on ? c + '22' : 'transparent',
+                            borderColor: on ? c : theme.brd2,
+                          }}
+                        >
+                          <Text
+                            style={{
+                              fontSize: 12,
+                              color: on ? c : theme.t4,
+                              fontWeight: '600',
+                            }}
+                          >
+                            {getTagLabel(v)}
+                          </Text>
+                        </TouchableOpacity>
+                      );
+                    })}
+                  </View>
+                )}
+              </View>
+            )}
+
+            <View style={{ flexDirection: 'row', gap: 8, alignItems: 'center', marginTop: 6 }}>
+              <View style={{ flex: 1 }}>
+                <StyledInput
+                  value={newTagDraft}
+                  onChangeText={setNewTagDraft}
+                  placeholder="Add a custom tag..."
+                  onSubmitEditing={addNewCustomTag}
+                />
+              </View>
+              <TouchableOpacity
+                onPress={addNewCustomTag}
+                disabled={!newTagDraft.trim()}
                 style={{
-                  fontSize: 12,
-                  color: ndDiff < 0 ? theme.red : ndDiff <= 7 ? theme.warn : theme.ac,
-                  marginTop: -8,
-                  marginBottom: 12,
+                  paddingHorizontal: 14,
+                  paddingVertical: 10,
+                  borderRadius: 10,
+                  borderWidth: 1,
+                  borderColor: theme.brdAc,
+                  backgroundColor: theme.bgAc,
+                  opacity: newTagDraft.trim() ? 1 : 0.5,
                 }}
               >
-                Next contact: {fmtDate(nd)} (
-                {ndDiff < 0 ? Math.abs(ndDiff) + 'd overdue' : ndDiff + 'd from now'})
-              </Text>
-            )}
-          </Section>
+                <Text style={{ color: theme.ac, fontSize: 12, fontWeight: '600' }}>Add</Text>
+              </TouchableOpacity>
+            </View>
+          </CollapsibleSection>
         )}
 
-        {/* Tags (skipped on My Card) */}
-        {!isMyCard && (
-          <Section label="Tags">
-            <TagSelector
-              tags={form.tags || []}
-              allTags={allTags || []}
-              onToggle={(t) =>
-                setForm((f) => ({
-                  ...f,
-                  tags: (f.tags || []).includes(t)
-                    ? f.tags.filter((x) => x !== t)
-                    : [...(f.tags || []), t],
-                }))
-              }
-              onAddTag={onAddTag}
-            />
-          </Section>
-        )}
-
-        {/* Conversation (skipped on My Card) */}
-        {!isMyCard && (
-          <Section label="Conversation">
-            <Field label="Key Topics Discussed">
-              <StyledInput
-                value={form.topics}
-                onChangeText={(v) => setForm((f) => ({ ...f, topics: v }))}
-                placeholder="What did you talk about?"
-                multiline
-                style={{ minHeight: 80 }}
-              />
-            </Field>
-            <Field label="Notes">
-              <StyledInput
-                value={form.notes}
-                onChangeText={(v) => setForm((f) => ({ ...f, notes: v }))}
-                placeholder="Context, follow-ups, anything else..."
-                multiline
-                style={{ minHeight: 80 }}
-              />
-            </Field>
-          </Section>
-        )}
-
-        {/* Background & Experience */}
-        <Section label="Background & Experience">
+        {/* Background */}
+        <CollapsibleSection label="Background & Experience" hasData={hasBackgroundData}>
           <Field label="Experience Details">
             <StyledInput
               value={form.experience || ''}
@@ -667,10 +1094,10 @@ export default function ContactForm({
               </Text>
             </TouchableOpacity>
           </Field>
-        </Section>
+        </CollapsibleSection>
 
         {/* Personal */}
-        <Section label="Personal">
+        <CollapsibleSection label="Personal" hasData={hasPersonalData}>
           <Field label="Hometown">
             <CityInput
               value={form.hometown}
@@ -831,10 +1258,119 @@ export default function ContactForm({
               onAddInterest={onAddInterest}
             />
           </Field>
-        </Section>
+        </CollapsibleSection>
+
+        {/* Addresses */}
+        <CollapsibleSection label="Addresses" hasData={hasAddressesData}>
+          {addresses.length === 0 && !addressesExpanded ? (
+            <AddRowButton
+              theme={theme}
+              label="+ Add an address"
+              onPress={addFirstAddress}
+            />
+          ) : (
+            <>
+              {addresses.map((a, i) => (
+                <AddressRow
+                  key={`addr-${i}`}
+                  theme={theme}
+                  address={a}
+                  index={i}
+                  count={addresses.length}
+                  onChange={(next) => {
+                    const arr = [...addresses];
+                    arr[i] = next;
+                    updateAddresses(arr);
+                  }}
+                  onRemove={() => {
+                    const next = addresses.filter((_, j) => j !== i);
+                    updateAddresses(next);
+                    if (next.length === 0) setAddressesExpanded(false);
+                  }}
+                  onMoveUp={() => updateAddresses(moveItem(addresses, i, i - 1))}
+                  onMoveDown={() => updateAddresses(moveItem(addresses, i, i + 1))}
+                />
+              ))}
+              <AddRowButton
+                theme={theme}
+                label="+ Add another address"
+                onPress={() => updateAddresses([...addresses, emptyAddress()])}
+              />
+            </>
+          )}
+        </CollapsibleSection>
+
+        {/* Mailing Lists */}
+        {!isMyCard && (
+          <CollapsibleSection label="Mailing Lists" hasData={hasMailingListsData}>
+            {availableLists.length > 0 ? (
+              <>
+                <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginBottom: 4 }}>
+                  {availableLists.map((list) => {
+                    const on = formMailingLists.includes(list.id);
+                    return (
+                      <TouchableOpacity
+                        key={list.id}
+                        onPress={() => toggleMailingList(list.id)}
+                        activeOpacity={0.7}
+                        style={{
+                          paddingHorizontal: 12,
+                          paddingVertical: 8,
+                          borderRadius: 20,
+                          borderWidth: 1,
+                          backgroundColor: on ? theme.bgAc : theme.bg2,
+                          borderColor: on ? theme.ac : theme.brd2,
+                        }}
+                      >
+                        <Text
+                          style={{
+                            fontSize: 12,
+                            color: on ? theme.ac : theme.t4,
+                            fontWeight: '600',
+                          }}
+                        >
+                          {list.name}
+                        </Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+                {addresses.length === 0 && formMailingLists.length > 0 && (
+                  <Text style={{ fontSize: 11, color: theme.warn, marginTop: 8, fontStyle: 'italic' }}>
+                    Add an address above so this contact can be exported on the mailing label.
+                  </Text>
+                )}
+              </>
+            ) : (
+              <Text style={{ fontSize: 12, color: theme.t6 }}>
+                Create a mailing list in Settings to add contacts to it.
+              </Text>
+            )}
+
+            <View style={{ marginTop: 14 }}>
+              <Text
+                style={{
+                  fontSize: 10,
+                  fontWeight: '700',
+                  color: theme.t5,
+                  letterSpacing: 0.5,
+                  textTransform: 'uppercase',
+                  marginBottom: 6,
+                }}
+              >
+                Recipient Name (for mailing labels)
+              </Text>
+              <StyledInput
+                value={form.recipientName || ''}
+                onChangeText={(v) => setForm((f) => ({ ...f, recipientName: v }))}
+                placeholder={displayName ? `Defaults to "${displayName}"` : 'e.g. The Smith Family'}
+              />
+            </View>
+          </CollapsibleSection>
+        )}
 
         {/* Export */}
-        {form.name?.trim() && (
+        {displayName ? (
           <TouchableOpacity
             onPress={exportVcf}
             style={{
@@ -855,7 +1391,7 @@ export default function ContactForm({
               Export to Contacts (.vcf)
             </Text>
           </TouchableOpacity>
-        )}
+        ) : null}
 
         {dupeWarn && (
           <View
@@ -872,7 +1408,7 @@ export default function ContactForm({
               Possible duplicate found
             </Text>
             <Text style={{ color: theme.t3, fontSize: 12, marginBottom: 10 }}>
-              "{dupeWarn.name}"{dupeWarn.email ? ' (' + dupeWarn.email + ')' : ''} already exists.
+              "{getDisplayName(dupeWarn)}"{dupeWarn.email ? ' (' + dupeWarn.email + ')' : ''} already exists.
             </Text>
             <View style={{ flexDirection: 'row', gap: 8 }}>
               <TouchableOpacity
@@ -895,7 +1431,6 @@ export default function ContactForm({
         )}
       </ScrollView>
 
-      {/* Bottom action bar. If onSkip is provided, render Save + Skip side by side. */}
       <View
         style={{
           position: 'absolute',
@@ -935,19 +1470,9 @@ export default function ContactForm({
   );
 }
 
-// =================== KidRow component ===================
-//
-// Each kid has gender, name, notes, plus an age input that toggles between
-// two modes: "age" (a single number, with auto-increment over time via
-// ageAsOf storage) and "birthday" (a three-box DateInput).
-//
-// When in "age" mode and the user types a number, we save:
-//   { age: '<typed string for display>', ageAsOf: { age: <number>, asOf: today } }
-// When in "birthday" mode, we save the date object.
+// =================== KidRow ===================
 
 function KidRow({ kid, theme, onChange, onRemove }) {
-  // Migrate legacy kid shape on render. If `kid.ageMode` is missing,
-  // infer from existing data: birthday wins if present, else 'age'.
   const k = kid || {};
   const hasBirthday =
     k.birthday && (typeof k.birthday === 'object' ? !dateObjectIsEmpty(k.birthday) : !!k.birthday);
@@ -958,8 +1483,6 @@ function KidRow({ kid, theme, onChange, onRemove }) {
   }
 
   function setAgeStr(v) {
-    // Persist the raw string for display, plus an ageAsOf record for the
-    // auto-increment math. Strip non-numeric (allow . for half-years).
     const cleaned = (v || '').replace(/[^0-9.]/g, '');
     const num = parseFloat(cleaned);
     const asOfRecord =
@@ -985,7 +1508,6 @@ function KidRow({ kid, theme, onChange, onRemove }) {
         backgroundColor: theme.bg2,
       }}
     >
-      {/* Top row: gender, name, remove */}
       <View style={{ flexDirection: 'row', gap: 8, alignItems: 'center' }}>
         <TouchableOpacity
           onPress={() => onChange({ ...k, gender: k.gender === 'girl' ? 'boy' : 'girl' })}
@@ -1019,7 +1541,6 @@ function KidRow({ kid, theme, onChange, onRemove }) {
         </TouchableOpacity>
       </View>
 
-      {/* Age / Birthday toggle */}
       <View style={{ flexDirection: 'row', gap: 6, marginTop: 10, marginBottom: 8 }}>
         <ModeBtn
           theme={theme}
@@ -1035,7 +1556,6 @@ function KidRow({ kid, theme, onChange, onRemove }) {
         />
       </View>
 
-      {/* Mode-specific input */}
       {ageMode === 'age' ? (
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
           <StyledInput
@@ -1053,7 +1573,6 @@ function KidRow({ kid, theme, onChange, onRemove }) {
         <DateInput value={k.birthday} onChange={setBirthday} compact />
       )}
 
-      {/* Notes */}
       <StyledInput
         placeholder="Notes about this child (optional)..."
         value={k.notes || ''}
@@ -1091,7 +1610,7 @@ function ModeBtn({ theme, on, label, onPress }) {
   );
 }
 
-// =================== Existing sub-components ===================
+// =================== Sub-components ===================
 
 function LabelPicker({ theme, value, presets, onChange }) {
   const isPresetMatch = presets.includes(value);
@@ -1362,6 +1881,76 @@ function AddressRow({ theme, address, index, count, onChange, onRemove, onMoveUp
       </View>
       {isPrimary && (
         <Text style={{ fontSize: 10, color: theme.t5, marginTop: 6 }}>Primary</Text>
+      )}
+    </View>
+  );
+}
+
+// Collapsible section wrapper. Smart default: expand if `hasData` is true,
+// collapse if empty. User can toggle either way.
+function CollapsibleSection({ label, hasData, badge, children }) {
+  const { theme } = useTheme();
+  const [open, setOpen] = useState(!!hasData);
+
+  return (
+    <View
+      style={{
+        backgroundColor: theme.bg2,
+        borderRadius: 14,
+        borderWidth: 1,
+        borderColor: theme.brd,
+        marginBottom: 14,
+        overflow: 'hidden',
+      }}
+    >
+      <TouchableOpacity
+        onPress={() => setOpen((v) => !v)}
+        activeOpacity={0.7}
+        style={{
+          flexDirection: 'row',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          paddingHorizontal: 14,
+          paddingVertical: 12,
+        }}
+      >
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+          <Text
+            style={{
+              fontSize: 10,
+              fontWeight: '700',
+              color: theme.t4,
+              letterSpacing: 0.6,
+              textTransform: 'uppercase',
+            }}
+          >
+            {label}
+          </Text>
+          {badge ? (
+            <View
+              style={{
+                paddingHorizontal: 6,
+                paddingVertical: 1,
+                borderRadius: 6,
+                backgroundColor: theme.bgAc,
+                borderWidth: 1,
+                borderColor: theme.brdAc,
+              }}
+            >
+              <Text style={{ fontSize: 9, color: theme.ac, fontWeight: '700' }}>
+                {badge}
+              </Text>
+            </View>
+          ) : null}
+        </View>
+        <Text style={{ fontSize: 11, color: theme.t5, fontWeight: '600' }}>
+          {open ? '▾' : '▸'}
+        </Text>
+      </TouchableOpacity>
+      {open && (
+        <View style={{ paddingHorizontal: 14, paddingBottom: 14, paddingTop: 2 }}>
+          {children}
+        </View>
       )}
     </View>
   );

@@ -2,7 +2,15 @@ import { onAuthChange, signOut } from './src/lib/auth';
 import AuthScreen from './src/screens/AuthScreen';
 import 'react-native-gesture-handler';
 import React, { useState, useEffect, useRef } from 'react';
-import { View, Text, ActivityIndicator, Alert, Linking } from 'react-native';
+import {
+  View,
+  Text,
+  ActivityIndicator,
+  Alert,
+  Linking,
+  Modal,
+  TouchableOpacity,
+} from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
@@ -14,6 +22,7 @@ import * as Sharing from 'expo-sharing';
 import { ThemeProvider, useTheme } from './src/styles/theme';
 import { useAppStore } from './src/hooks/useAppStore';
 import { runGranolaSync, shouldRunBackgroundSync } from './src/utils/granolaSync';
+import { aiExtractFromVoice } from './src/utils/ai';
 import NavBar from './src/components/NavBar';
 import { Toast } from './src/components/Common';
 import LogTouchpointModal from './src/components/LogTouchpointModal';
@@ -36,20 +45,16 @@ import MailingListDetailScreen from './src/screens/MailingListDetailScreen';
 import ReviewQueueScreen from './src/screens/ReviewQueueScreen';
 
 import { addDays, isoToday } from './src/utils/helpers';
-import { EMPTY_CONTACT } from './src/constants';
+import { EMPTY_CONTACT, getDisplayName, splitLegacyName } from './src/constants';
 
-import {
-  InstrumentSerif_400Regular,
-} from '@expo-google-fonts/instrument-serif';
+import { InstrumentSerif_400Regular } from '@expo-google-fonts/instrument-serif';
 import {
   DMSans_400Regular,
   DMSans_500Medium,
   DMSans_600SemiBold,
   DMSans_700Bold,
 } from '@expo-google-fonts/dm-sans';
-import {
-  Newsreader_400Regular,
-} from '@expo-google-fonts/newsreader';
+import { Newsreader_400Regular } from '@expo-google-fonts/newsreader';
 import {
   Karla_400Regular,
   Karla_500Medium,
@@ -91,7 +96,7 @@ function buildMailingListCsv(list, contactsOnList) {
     }
     const idx = typeof overrides[c.id] === 'number' ? overrides[c.id] : 0;
     const addr = addresses[idx] || addresses[0];
-    const recipient = (c.recipientName && c.recipientName.trim()) || c.name || '';
+    const recipient = (c.recipientName && c.recipientName.trim()) || getDisplayName(c) || '';
     rows.push(
       csvRow([
         recipient,
@@ -120,9 +125,6 @@ function AppInner() {
   const [selected, setSelected] = useState(null);
   const [editForm, setEditForm] = useState(null);
   const [editFlash, setEditFlash] = useState(false);
-  // When set, Cancel/Save on the contact form returns to this view instead
-  // of the default routing. Used so that creating a contact from the
-  // review queue returns the user to the review queue, not the contacts list.
   const [formReturnView, setFormReturnView] = useState(null);
   const [dupeWarn, setDupeWarn] = useState(null);
   const [forceSavePending, setForceSavePending] = useState(false);
@@ -132,6 +134,9 @@ function AppInner() {
   const [user, setUser] = useState(null);
   const [authChecked, setAuthChecked] = useState(false);
   const [selectedListId, setSelectedListId] = useState(null);
+  const [pendingAttendeeItem, setPendingAttendeeItem] = useState(null);
+  const [extractingForAttendee, setExtractingForAttendee] = useState(false);
+  const [aiFillPrompt, setAiFillPrompt] = useState(null);
 
   useEffect(() => {
     if (store.loaded && store.pin) {
@@ -147,9 +152,6 @@ function AppInner() {
     return () => subscription?.unsubscribe();
   }, []);
 
-  // Silent background sync once per app session, throttled to once per
-  // 30 minutes via the lastSync timestamp. Fires when the user is loaded
-  // in, signed in, unlocked, and has connected Granola.
   const autoSyncRanRef = useRef(false);
   useEffect(() => {
     if (autoSyncRanRef.current) return;
@@ -172,31 +174,36 @@ function AppInner() {
           apiKey,
           contacts: store.contacts,
           myCard: store.myCard,
-          onProgress: () => {}, // silent
+          onProgress: () => {},
           onCommit: store.commit,
           addToReviewQueue: store.addToReviewQueue,
           granolaAiUnlocked: store.featureUnlocked('granolaAiProcessing'),
         });
 
-        // Only show toast if anything actually happened
         if (result.hadAnything) {
           showToast('Granola: ' + result.summary, theme.ac);
         }
       } catch (e) {
         console.warn('Background Granola sync skipped:', e?.message);
-        // Silent failure — do not bother the user
       }
     })();
-  }, [store.loaded, user, locked, store.onboarded, store.contacts, store.myCard, store.commit, store.addToReviewQueue, theme.ac]);
+  }, [
+    store.loaded,
+    user,
+    locked,
+    store.onboarded,
+    store.contacts,
+    store.myCard,
+    store.commit,
+    store.addToReviewQueue,
+    theme.ac,
+  ]);
 
   function showToast(msg, color) {
     setToast({ msg, color });
     setTimeout(() => setToast(null), 2200);
   }
 
-  // Sign the user out of Supabase. The onAuthChange listener will pick up
-  // the change and flip user back to null, which routes us to AuthScreen.
-  // No need to manually clear state — the auth gate handles it.
   async function handleSignOut() {
     try {
       if (typeof signOut === 'function') {
@@ -216,10 +223,6 @@ function AppInner() {
     }
   }
 
-  // Handles the "Start trial" button on the paywall modal. Asks the Stripe
-  // Edge Function to create a checkout session, then opens the URL in the
-  // browser. Stripe redirects back via a `radius://` deep link after pay or
-  // cancel, which is handled by the Linking listener below.
   async function handleStartTrial(plan = 'monthly') {
     try {
       const { url } = await createCheckoutSession({ plan, trial: true });
@@ -228,10 +231,7 @@ function AppInner() {
       if (supported) {
         await Linking.openURL(url);
       } else {
-        Alert.alert(
-          'Could not open checkout',
-          'Please try again or contact support.',
-        );
+        Alert.alert('Could not open checkout', 'Please try again or contact support.');
       }
     } catch (e) {
       console.error('handleStartTrial failed:', e?.message);
@@ -239,8 +239,6 @@ function AppInner() {
     }
   }
 
-  // Open Stripe Customer Portal so trial users can manage their subscription
-  // before the trial ends. Triggered by the trial banner's Manage button.
   async function openBillingPortal() {
     try {
       const { url } = await createPortalSession();
@@ -256,15 +254,11 @@ function AppInner() {
     }
   }
 
-  // Listen for deep link returns from Stripe checkout. The Edge Function  // sets success_url and cancel_url to radius:// URLs that we intercept here.
-  // On success, refresh the profile so the new tier is reflected.
   useEffect(() => {
     const handleUrl = ({ url }) => {
       if (!url) return;
       if (url.startsWith('radius://checkout-success')) {
         showToast('Welcome to Pro!', theme.ac);
-        // Refresh tier from server. Webhook may take a moment to fire so
-        // give it a beat. Two retries in case the first is too quick.
         setTimeout(() => store.refetchProfile(), 1500);
         setTimeout(() => store.refetchProfile(), 4500);
       } else if (url.startsWith('radius://checkout-cancel')) {
@@ -272,7 +266,6 @@ function AppInner() {
       }
     };
     const sub = Linking.addEventListener('url', handleUrl);
-    // Also check if app was opened with a URL from cold start.
     Linking.getInitialURL().then((url) => {
       if (url) handleUrl({ url });
     });
@@ -284,12 +277,6 @@ function AppInner() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [theme.ac]);
 
-  // Trial urgency toasts: fire once per threshold per device. Stored in
-  // AsyncStorage so they don't repeat on every app open. Two thresholds:
-  //   - 3 days remaining (warning level): "3 days left in trial. Manage..."
-  //   - 1 day or less remaining (urgent): "Trial ends today. Manage..."
-  // Each fires the FIRST time we observe the user crossing into that
-  // threshold. After that, the banner alone reminds them.
   useEffect(() => {
     if (!store.trialActive) return;
     if (store.trialDaysLeft == null) return;
@@ -309,9 +296,7 @@ function AppInner() {
             await AsyncStorage.setItem('crm-trial-toast-3d', 'true');
           }
         }
-      } catch (_) {
-        // Toast is a nice-to-have; never block on storage errors.
-      }
+      } catch (_) {}
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [store.trialActive, store.trialDaysLeft]);
@@ -323,12 +308,16 @@ function AppInner() {
       next = store.contacts.map((c) => (c.id === updated.id ? updated : c));
     } else {
       if (!skipDupeCheck) {
-        const dupe = store.contacts.find(
-          (c) =>
-            !c.archived &&
-            ((c.name && updated.name && c.name.toLowerCase() === updated.name.toLowerCase()) ||
-              (c.email && updated.email && c.email.toLowerCase() === updated.email.toLowerCase())),
-        );
+        const updatedDisplay = getDisplayName(updated).toLowerCase();
+        const updatedEmail = (updated.email || updated.emails?.[0]?.value || '').toLowerCase();
+        const dupe = store.contacts.find((c) => {
+          if (c.archived) return false;
+          const cDisplay = getDisplayName(c).toLowerCase();
+          const cEmail = (c.email || c.emails?.[0]?.value || '').toLowerCase();
+          if (cDisplay && updatedDisplay && cDisplay === updatedDisplay) return true;
+          if (cEmail && updatedEmail && cEmail === updatedEmail) return true;
+          return false;
+        });
         if (dupe) {
           setDupeWarn(dupe);
           return false;
@@ -342,14 +331,98 @@ function AppInner() {
     return true;
   }
 
+  async function finalizeAttendeeContactIfNeeded(savedContact) {
+    if (!pendingAttendeeItem) return;
+    const item = pendingAttendeeItem;
+    setPendingAttendeeItem(null);
+
+    try {
+      const expectedEntryId = 'granola_' + item.noteId + '_' + savedContact.id;
+      const seededEntryId = 'granola_' + item.noteId + '_pending';
+      const log = Array.isArray(savedContact.convLog) ? savedContact.convLog : [];
+      const alreadyHasEntry = log.some(
+        (e) => e.id === expectedEntryId || e.id === seededEntryId,
+      );
+
+      if (alreadyHasEntry) {
+        const needsPromotion = log.some((e) => e.id === seededEntryId);
+        if (needsPromotion) {
+          const updated = store.contacts.map((c) => {
+            if (c.id !== savedContact.id) return c;
+            const cLog = Array.isArray(c.convLog) ? c.convLog : [];
+            return {
+              ...c,
+              convLog: cLog.map((e) =>
+                e.id === seededEntryId ? { ...e, id: expectedEntryId } : e,
+              ),
+            };
+          });
+          store.commit(updated);
+        }
+      } else {
+        const date = item.meetingDate || isoToday();
+        const text =
+          (item.rawText || '').trim() ||
+          (item.rawTranscript || '').trim() ||
+          ('Meeting: ' + (item.meetingTitle || 'Untitled') + ' on ' + date);
+        const entry = {
+          id: expectedEntryId,
+          date,
+          text,
+          type: 'meeting',
+          source: 'granola',
+          source_id: item.noteId,
+        };
+        if (item.rawTranscript && item.rawTranscript.trim()) {
+          entry.rawTranscript = item.rawTranscript;
+        }
+        const updated = store.contacts.map((c) => {
+          if (c.id !== savedContact.id) return c;
+          const cLog = Array.isArray(c.convLog) ? c.convLog : [];
+          if (cLog.some((e) => e.id === entry.id)) return c;
+          return {
+            ...c,
+            convLog: [entry, ...cLog],
+            lastContacted: date > (c.lastContacted || '') ? date : c.lastContacted,
+          };
+        });
+        store.commit(updated);
+      }
+
+      if (item._aiSpeakerSource) {
+        const { parentItemId, speakerIndex } = item._aiSpeakerSource;
+        const parent = (store.reviewQueue || []).find((q) => q.id === parentItemId);
+        if (parent) {
+          const currentAi = Array.isArray(parent.aiAttendees)
+            ? parent.aiAttendees
+            : [];
+          const nextAi = currentAi.filter((_, i) => i !== speakerIndex);
+          if (nextAi.length === 0) {
+            await store.removeFromReviewQueue(parentItemId);
+          } else {
+            await store.patchReviewQueueItem(parentItemId, {
+              aiAttendees: nextAi,
+            });
+          }
+        }
+      } else {
+        await store.removeFromReviewQueue(item.id);
+      }
+    } catch (e) {
+      console.warn('finalizeAttendeeContactIfNeeded failed:', e?.message);
+    }
+  }
+
   function saveCurrentForm() {
     const ok = commitContact(editForm, forceSavePending);
     if (ok) {
       const returnTo = formReturnView;
+      const savedSnapshot = { ...editForm };
       setEditForm(null);
       setEditFlash(false);
       setForceSavePending(false);
       setFormReturnView(null);
+      finalizeAttendeeContactIfNeeded(savedSnapshot);
       if (returnTo) {
         setView(returnTo);
       } else {
@@ -365,10 +438,12 @@ function AppInner() {
     const ok = commitContact(editForm, true);
     if (ok) {
       const returnTo = formReturnView;
+      const savedSnapshot = { ...editForm };
       setEditForm(null);
       setEditFlash(false);
       setForceSavePending(false);
       setFormReturnView(null);
+      finalizeAttendeeContactIfNeeded(savedSnapshot);
       if (returnTo) {
         setView(returnTo);
       } else {
@@ -381,7 +456,7 @@ function AppInner() {
 
   function archiveContact(c) {
     store.commit(store.contacts.map((x) => (x.id === c.id ? { ...x, archived: true } : x)));
-    showToast(c.name + ' archived', theme.warn);
+    showToast(getDisplayName(c) + ' archived', theme.warn);
     if (selected?.id === c.id) {
       setSelected(null);
       setView('list');
@@ -389,7 +464,7 @@ function AppInner() {
   }
   function unarchiveContact(c) {
     store.commit(store.contacts.map((x) => (x.id === c.id ? { ...x, archived: false } : x)));
-    showToast(c.name + ' restored', theme.ac);
+    showToast(getDisplayName(c) + ' restored', theme.ac);
   }
   function deleteContact(c) {
     store.commit(store.contacts.filter((x) => x.id !== c.id));
@@ -403,9 +478,6 @@ function AppInner() {
     if (selected?.id === updated.id) setSelected(updated);
   }
 
-  // Wrapper around store.toggleContactOnList that also keeps the
-  // currently-selected contact in sync (so the detail screen reflects
-  // the change immediately).
   function toggleContactOnListLocal(contact, listId) {
     const updated = store.toggleContactOnList(contact, listId);
     if (selected?.id === contact.id) setSelected(updated);
@@ -441,33 +513,145 @@ function AppInner() {
     };
     updateContact(updated);
     setLogModal({ visible: false, contact: null });
-    showToast('Logged with ' + c.name);
+    showToast('Logged with ' + getDisplayName(c));
   }
 
-  // Open the review queue screen.
   function openReviewQueue() {
     setView('review_queue');
   }
 
-  // From a queue item, jump into the contact form pre-filled with the
-  // attendee's name + email so the user can finish creating them. The
-  // queue item is left in place; user can come back and confirm against
-  // the new contact (which now has the email, so a future sync will match
-  // automatically anyway).
   function createContactFromAttendee(item) {
+    const aiUnlocked = store.featureUnlocked('granolaAiProcessing');
+    const transcript = item?.rawText || item?.rawTranscript || '';
+    const hasTranscript = !!transcript.trim();
+
+    if (aiUnlocked && hasTranscript) {
+      setAiFillPrompt({ item });
+    } else {
+      openBlankFormFromAttendee(item);
+    }
+  }
+
+  function openBlankFormFromAttendee(item) {
     const att = item?.attendee || {};
+    const split = splitLegacyName(att.name || '');
+    const transcript = (item?.rawTranscript || '').trim() || (item?.rawText || '').trim();
+    const date = item?.meetingDate || isoToday();
+
     const prefill = {
       ...EMPTY_CONTACT,
-      name: att.name || '',
+      firstName: split.firstName,
+      lastName: split.lastName,
       email: att.email || '',
     };
     if (att.email) {
       prefill.emails = [{ label: 'Personal', value: att.email }];
     }
+    if (transcript || item?.noteId) {
+      const fallbackText =
+        'Meeting: ' + (item?.meetingTitle || 'Untitled') + ' on ' + date;
+      const entry = {
+        id: 'granola_' + item.noteId + '_pending',
+        date,
+        text: fallbackText,
+        type: 'meeting',
+        source: 'granola',
+        source_id: item.noteId,
+      };
+      if (transcript) entry.rawTranscript = transcript;
+      prefill.convLog = [entry];
+      prefill.lastContacted = date;
+    }
+
+    setPendingAttendeeItem(item);
     setEditForm(prefill);
     setEditFlash(true);
     setFormReturnView('review_queue');
     setView('edit');
+  }
+
+  async function openAiFilledFormFromAttendee(item) {
+    const att = item?.attendee || {};
+    const transcript = item?.rawText || item?.rawTranscript || '';
+    const date = item?.meetingDate || isoToday();
+
+    setPendingAttendeeItem(item);
+    setExtractingForAttendee(true);
+    showToast('Reading the transcript...', theme.purp);
+
+    try {
+      const extracted = await aiExtractFromVoice(transcript, {
+        myCard: store.myCard,
+        attendeeName: att.name || '',
+        summaryLength: store.meetingSummaryLength,
+      });
+
+      let extractedFirst = extracted.firstName || '';
+      let extractedLast = extracted.lastName || '';
+      if (!extractedFirst && !extractedLast && typeof extracted.name === 'string') {
+        const split = splitLegacyName(extracted.name);
+        extractedFirst = split.firstName;
+        extractedLast = split.lastName;
+      }
+      if (!extractedFirst && !extractedLast && att.name) {
+        const split = splitLegacyName(att.name);
+        extractedFirst = split.firstName;
+        extractedLast = split.lastName;
+      }
+
+      const {
+        name: _droppedName,
+        notes: _droppedNotes,
+        meetingSummary: aiMeetingSummary,
+        ...extractedRest
+      } = extracted;
+
+      const merged = {
+        ...EMPTY_CONTACT,
+        ...extractedRest,
+        firstName: extractedFirst,
+        lastName: extractedLast,
+        email: att.email || extracted.email || '',
+        notes: '',
+      };
+      if (att.email) {
+        const aiEmails = Array.isArray(extracted.emails) ? extracted.emails : [];
+        const alreadyHas = aiEmails.some(
+          (e) => (e?.value || '').toLowerCase() === att.email.toLowerCase(),
+        );
+        merged.emails = alreadyHas
+          ? aiEmails
+          : [{ label: 'Personal', value: att.email }, ...aiEmails];
+      }
+
+      const summaryText = (aiMeetingSummary || '').trim();
+      const fallbackText =
+        'Meeting: ' + (item?.meetingTitle || 'Untitled') + ' on ' + date;
+      const entry = {
+        id: 'granola_' + item.noteId + '_pending',
+        date,
+        text: summaryText || fallbackText,
+        type: 'meeting',
+        source: 'granola',
+        source_id: item.noteId,
+      };
+      if (transcript && transcript.trim()) {
+        entry.rawTranscript = transcript;
+      }
+      merged.convLog = [entry];
+      merged.lastContacted = date;
+
+      setEditForm(merged);
+      setEditFlash(true);
+      setFormReturnView('review_queue');
+      setView('edit');
+      showToast('Review the details and save', theme.ac);
+    } catch (e) {
+      console.warn('AI extraction for attendee failed:', e?.message);
+      showToast('AI extraction failed, filling name only', theme.warn);
+      openBlankFormFromAttendee(item);
+    }
+    setExtractingForAttendee(false);
   }
 
   async function exportMailingList(list, contactsOnList) {
@@ -504,22 +688,33 @@ function AppInner() {
     );
   }
 
-  // Modals that should appear on every screen of the app go here. Each
-  // return block below includes {globalModals} so the paywall, etc., can
-  // surface from any view (DetailScreen, ContactForm, etc).
   const globalModals = (
-    <PaywallModal
-      visible={!!store.paywallReason}
-      reason={store.paywallReason}
-      onDismiss={store.dismissPaywall}
-      onStartTrial={(plan) => handleStartTrial(plan || 'monthly')}
-    />
+    <>
+      <PaywallModal
+        visible={!!store.paywallReason}
+        reason={store.paywallReason}
+        onDismiss={store.dismissPaywall}
+        onStartTrial={(plan) => handleStartTrial(plan || 'monthly')}
+      />
+      <AiFillPromptModal
+        visible={!!aiFillPrompt}
+        theme={theme}
+        attendeeName={aiFillPrompt?.item?.attendee?.name || ''}
+        onYes={() => {
+          const item = aiFillPrompt?.item;
+          setAiFillPrompt(null);
+          if (item) openAiFilledFormFromAttendee(item);
+        }}
+        onNo={() => {
+          const item = aiFillPrompt?.item;
+          setAiFillPrompt(null);
+          if (item) openBlankFormFromAttendee(item);
+        }}
+        onCancel={() => setAiFillPrompt(null)}
+      />
+    </>
   );
 
-  // Trial banner sits at the very top of the screen for trial users only.
-  // Rendered inline (not as a modal) so it pushes content down rather than
-  // overlaying it. Each screen's return path includes {globalBanner} at the
-  // top of its View wrapper.
   const globalBanner = (
     <TrialBanner
       trialActive={store.trialActive}
@@ -556,6 +751,21 @@ function AppInner() {
     return <LockScreen pin={store.pin} onUnlock={() => setLocked(false)} />;
   }
 
+  if (extractingForAttendee) {
+    return (
+      <View style={{ flex: 1, backgroundColor: theme.bg, alignItems: 'center', justifyContent: 'center' }}>
+        {globalBanner}
+        <ActivityIndicator color={theme.purp} size="large" />
+        <Text style={{ color: theme.t3, marginTop: 16, fontSize: 13 }}>
+          Reading the transcript...
+        </Text>
+        <Text style={{ color: theme.t5, marginTop: 4, fontSize: 11 }}>
+          Pulling out details about this contact
+        </Text>
+      </View>
+    );
+  }
+
   if (view === 'detail' && selected) {
     return (
       <View style={{ flex: 1, backgroundColor: theme.bg }}>
@@ -579,6 +789,8 @@ function AppInner() {
           consumeAiCall={store.consumeAiCall}
           aiRemaining={store.aiRemaining}
           effectiveTier={store.effectiveTier}
+          myCard={store.myCard}
+          meetingSummaryLength={store.meetingSummaryLength}
         />
         {globalModals}
         <Toast toast={toast} />
@@ -600,6 +812,7 @@ function AppInner() {
             setEditFlash(false);
             setDupeWarn(null);
             setFormReturnView(null);
+            setPendingAttendeeItem(null);
             if (returnTo) {
               setView(returnTo);
             } else if (selected) {
@@ -754,7 +967,7 @@ function AppInner() {
   }
 
   if (tab === 'add') {
-    if (addMode === 'manual' || (addMode && addMode !== 'voice' && addMode !== 'card' && addMode !== 'import' && addMode !== 'receive' && addMode !== 'share' && view === 'edit')) {
+    if (addMode === 'manual' || (addMode && addMode !== 'voice' && addMode !== 'card' && addMode !== 'import' && addMode !== 'receive' && addMode !== 'share' && addMode !== 'granola' && view === 'edit')) {
       return null;
     }
     return (
@@ -769,12 +982,23 @@ function AppInner() {
               setView('edit');
               setAddMode(null);
               setTab('contacts');
+            } else if (m === 'granola') {
+              setAddMode(null);
+              setTab('settings');
+              setView('review_queue');
             } else {
               setAddMode(m);
             }
           }}
           onComplete={(prefilled) => {
-            setEditForm({ ...EMPTY_CONTACT, ...prefilled });
+            const seed = { ...EMPTY_CONTACT, ...prefilled };
+            if (!seed.firstName && !seed.lastName && typeof seed.name === 'string' && seed.name.trim()) {
+              const split = splitLegacyName(seed.name);
+              seed.firstName = split.firstName;
+              seed.lastName = split.lastName;
+            }
+            delete seed.name;
+            setEditForm(seed);
             setEditFlash(true);
             setView('edit');
             setAddMode(null);
@@ -784,6 +1008,7 @@ function AppInner() {
           myCard={store.myCard}
           onCommit={store.commit}
           showToast={showToast}
+          reviewQueue={store.reviewQueue}
           onBack={() => {
             setAddMode(null);
             setTab('contacts');
@@ -884,6 +1109,18 @@ function AppInner() {
           hasStripeCustomer={!!store.profile?.stripe_customer_id}
           onShowPaywall={store.showPaywall}
           onSignOut={handleSignOut}
+          meetingSummaryLength={store.meetingSummaryLength}
+          onSaveMeetingSummaryLength={store.saveMeetingSummaryLength}
+          notificationsEnabled={store.notificationsEnabled}
+          notifOverdue={store.notifOverdue}
+          notifBirthdays={store.notifBirthdays}
+          hasPushToken={store.hasPushToken}
+          onSaveNotificationPrefs={store.saveNotificationPrefs}
+          onRegisterPushToken={store.registerPushToken}
+          onImportContactsPress={() => {
+            setAddMode('import');
+            setTab('add');
+          }}
         />
       )}
 
@@ -911,6 +1148,112 @@ function AppInner() {
       {globalModals}
       <Toast toast={toast} />
     </View>
+  );
+}
+
+function AiFillPromptModal({ visible, theme, attendeeName, onYes, onNo, onCancel }) {
+  return (
+    <Modal
+      visible={visible}
+      transparent
+      animationType="fade"
+      onRequestClose={onCancel}
+    >
+      <TouchableOpacity
+        activeOpacity={1}
+        onPress={onCancel}
+        style={{
+          flex: 1,
+          backgroundColor: 'rgba(0,0,0,0.5)',
+          justifyContent: 'center',
+          alignItems: 'center',
+          padding: 20,
+        }}
+      >
+        <TouchableOpacity
+          activeOpacity={1}
+          onPress={() => {}}
+          style={{
+            backgroundColor: theme.bg,
+            borderRadius: 18,
+            borderWidth: 1,
+            borderColor: theme.brd,
+            width: '100%',
+            maxWidth: 420,
+            padding: 20,
+          }}
+        >
+          <Text
+            style={{
+              fontSize: 17,
+              color: theme.t1,
+              fontWeight: '600',
+              marginBottom: 8,
+              fontFamily: theme.fontDisplay,
+            }}
+          >
+            Have AI fill in details?
+          </Text>
+          <Text
+            style={{
+              fontSize: 13,
+              color: theme.t4,
+              lineHeight: 19,
+              marginBottom: 18,
+            }}
+          >
+            {attendeeName
+              ? `AI can read the meeting transcript and pull out everything ${attendeeName} mentioned. Company, role, family, interests, deals. To pre-fill the contact card for you to review.`
+              : 'AI can read the meeting transcript and pull out everything mentioned about this contact. Company, role, family, interests, deals. To pre-fill the contact card for you to review.'}
+          </Text>
+          <View style={{ gap: 8 }}>
+            <TouchableOpacity
+              onPress={onYes}
+              activeOpacity={0.8}
+              style={{
+                paddingVertical: 12,
+                borderRadius: 10,
+                backgroundColor: theme.purp,
+                alignItems: 'center',
+                flexDirection: 'row',
+                justifyContent: 'center',
+                gap: 8,
+              }}
+            >
+              <Text style={{ color: '#fff', fontSize: 13, fontWeight: '700' }}>
+                Yes, let AI fill it in
+              </Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              onPress={onNo}
+              activeOpacity={0.8}
+              style={{
+                paddingVertical: 12,
+                borderRadius: 10,
+                backgroundColor: theme.bg3,
+                borderWidth: 1,
+                borderColor: theme.brd2,
+                alignItems: 'center',
+              }}
+            >
+              <Text style={{ color: theme.t2, fontSize: 13, fontWeight: '600' }}>
+                No, I'll fill it in myself
+              </Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              onPress={onCancel}
+              activeOpacity={0.8}
+              style={{
+                paddingVertical: 10,
+                alignItems: 'center',
+              }}
+            >
+              <Text style={{ color: theme.t5, fontSize: 12 }}>Cancel</Text>
+            </TouchableOpacity>
+          </View>
+        </TouchableOpacity>
+      </TouchableOpacity>
+    </Modal>
   );
 }
 

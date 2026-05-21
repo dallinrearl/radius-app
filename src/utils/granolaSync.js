@@ -5,10 +5,16 @@
 //   - SettingsScreen → user-triggered "Sync Now" button (with progress UI)
 //   - App.js → silent background sync on app launch (throttled)
 //
-// The function is pure-ish: it takes everything it needs as args, calls
-// onProgress(text) for status updates, and returns a result summary.
-// Storage I/O for processed-IDs and last-sync timestamps stays here so
-// callers don't have to coordinate.
+// Behavior:
+//   - When Granola returns one or more attendees besides the user, we use
+//     them. Email-matched contacts get auto-saved log entries; name-only
+//     matches and unmatched attendees go to the review queue.
+//   - When Granola returns ONLY the user as an attendee (or no attendees
+//     at all), we still queue the meeting — but as a single "no-name"
+//     queue item with an empty attendee. The ReviewQueueScreen then offers
+//     AI extraction (Pro) or manual review of the transcript to the user
+//     so they can identify and add the contact themselves.
+//   - We NEVER queue the user as an attendee.
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import {
@@ -26,26 +32,29 @@ import { isoToday } from './helpers';
 const GRANOLA_LAST_SYNC_STORAGE = 'crm-granola-last-sync';
 const GRANOLA_PROCESSED_IDS_STORAGE = 'crm-granola-processed-ids';
 
+// Count "real" attendees in a note (everyone except the user).
+// Returns 0 when Granola reports only the user, or no attendees at all.
+function countNonUserAttendees(attendees, myEmails, myNames) {
+  if (!Array.isArray(attendees)) return 0;
+  const myEmailSet = new Set(
+    myEmails.map((e) => (e || '').toLowerCase()).filter(Boolean),
+  );
+  const myNameSet = new Set(
+    myNames.map((n) => (n || '').toLowerCase().trim()).filter(Boolean),
+  );
+  let count = 0;
+  for (const a of attendees) {
+    const email = (a?.email || '').toLowerCase().trim();
+    const name = (a?.name || '').toLowerCase().trim();
+    if (email && myEmailSet.has(email)) continue;
+    if (name && myNameSet.has(name)) continue;
+    if (!email && !name) continue;
+    count++;
+  }
+  return count;
+}
+
 // Run a Granola sync. Returns a result object describing what happened.
-// Throws on hard failure (proxy down, auth invalid, etc.) — caller should
-// catch and present.
-//
-// args:
-//   apiKey:           Granola API key (already validated)
-//   contacts:         current contacts array
-//   myCard:           user's card (for self-skipping)
-//   onProgress:       optional (statusText) => void for UI updates
-//   onCommit:         (updatedContacts) => void, called with new contacts array
-//   addToReviewQueue: (items) => Promise<void>, called with new queue items
-//
-// returns:
-//   {
-//     ok: true,
-//     appendedCount: number,    // log entries added via email match
-//     queuedCount: number,      // items pushed to review queue
-//     hadAnything: boolean,     // any new note found at all
-//     summary: string,          // human-readable summary
-//   }
 export async function runGranolaSync({
   apiKey,
   contacts,
@@ -63,7 +72,6 @@ export async function runGranolaSync({
     if (typeof onProgress === 'function') onProgress(msg);
   };
 
-  // Build "since": last sync minus 1 day for safety, or 30 days back if first sync
   const lastSync = await AsyncStorage.getItem(GRANOLA_LAST_SYNC_STORAGE);
   const since = lastSync
     ? new Date(new Date(lastSync).getTime() - 24 * 60 * 60 * 1000).toISOString()
@@ -74,7 +82,6 @@ export async function runGranolaSync({
 
   progress('Fetching recent meetings...');
 
-  // 1) List recent notes
   const notes = await listRecentNotes(apiKey, { since, maxNotes: 30 });
 
   if (notes.length === 0) {
@@ -102,7 +109,7 @@ export async function runGranolaSync({
     };
   }
 
-  // Self-skip: collect user's emails + names so they don't end up in the queue
+  // Build user-identity sets once for the whole sync run.
   const myEmails = [];
   if (myCard?.email) myEmails.push(myCard.email);
   if (Array.isArray(myCard?.emails)) {
@@ -112,11 +119,11 @@ export async function runGranolaSync({
   if (myCard?.name) myNames.push(myCard.name);
   if (myCard?.displayName) myNames.push(myCard.displayName);
 
-  // 2) Process each note
   let updated = [...contacts];
   let appendedCount = 0;
   let queuedNameOnlyCount = 0;
   let queuedUnmatchedCount = 0;
+  let queuedNoNameCount = 0;
   const newQueueItems = [];
   const newProcessed = new Set(processed);
 
@@ -132,84 +139,108 @@ export async function runGranolaSync({
       continue;
     }
 
-    const matches = matchAttendeesToContacts(full.attendees, updated, myEmails, myNames);
-
     const date = noteDate(full) || isoToday();
     const rawText = noteToRawText(full);
     const transcriptText = noteToTranscriptText(full);
     const meetingTitle = full?.title || 'Untitled meeting';
 
-    // 2a) Auto-save email matches
-    for (const { contact } of matches.emailMatches) {
-      try {
-        // Free users: save the raw Granola note as-is (no Claude extraction).
-        // Pro users: run Claude to extract a contact-targeted note.
-        const extracted = granolaAiUnlocked
-          ? await aiExtractMeetingNote(contact, rawText, myCard)
-          : (rawText || '').trim() || meetingTitle;
-        const entry = {
-          id: 'granola_' + note.id + '_' + contact.id,
-          date,
-          text: extracted,
-          type: 'meeting',
-          source: 'granola',
-          source_id: note.id,
-        };
-        if (transcriptText && transcriptText.trim()) {
-          entry.rawTranscript = transcriptText;
-        }
-        updated = updated.map((c) => {
-          if (c.id !== contact.id) return c;
-          const log = Array.isArray(c.convLog) ? c.convLog : [];
-          if (log.some((e) => e.id === entry.id)) return c;
-          return {
-            ...c,
-            convLog: [entry, ...log],
-            lastContacted: date > (c.lastContacted || '') ? date : c.lastContacted,
-          };
-        });
-        appendedCount++;
-      } catch (e) {
-        console.warn('Extraction failed for note', note.id, 'contact', contact.id, e.message);
-      }
-    }
+    const nonUserCount = countNonUserAttendees(full?.attendees, myEmails, myNames);
 
-    // 2b) Queue name-only matches
-    for (const { attendee, contact } of matches.nameMatches) {
-      newQueueItems.push(
-        makeQueueItem({
-          noteId: note.id,
-          meetingTitle,
-          meetingDate: date,
-          attendee,
-          suggestion: { contactId: contact.id, reason: 'Name match' },
-          rawTranscript: transcriptText,
-          rawText,
-        }),
+    if (nonUserCount > 0) {
+      // Normal path: Granola provided non-user attendees. Use them.
+      const matches = matchAttendeesToContacts(
+        full.attendees,
+        updated,
+        myEmails,
+        myNames,
       );
-      queuedNameOnlyCount++;
-    }
 
-    // 2c) Queue unmatched attendees
-    for (const attendee of matches.unmatched) {
+      // Auto-save email matches
+      for (const { contact } of matches.emailMatches) {
+        try {
+          const extracted = granolaAiUnlocked
+            ? await aiExtractMeetingNote(contact, rawText, myCard)
+            : (rawText || '').trim() || meetingTitle;
+          const entry = {
+            id: 'granola_' + note.id + '_' + contact.id,
+            date,
+            text: extracted,
+            type: 'meeting',
+            source: 'granola',
+            source_id: note.id,
+          };
+          if (transcriptText && transcriptText.trim()) {
+            entry.rawTranscript = transcriptText;
+          }
+          updated = updated.map((c) => {
+            if (c.id !== contact.id) return c;
+            const log = Array.isArray(c.convLog) ? c.convLog : [];
+            if (log.some((e) => e.id === entry.id)) return c;
+            return {
+              ...c,
+              convLog: [entry, ...log],
+              lastContacted: date > (c.lastContacted || '') ? date : c.lastContacted,
+            };
+          });
+          appendedCount++;
+        } catch (e) {
+          console.warn('Extraction failed for note', note.id, 'contact', contact.id, e.message);
+        }
+      }
+
+      // Queue name-only matches
+      for (const { attendee, contact } of matches.nameMatches) {
+        newQueueItems.push(
+          makeQueueItem({
+            noteId: note.id,
+            meetingTitle,
+            meetingDate: date,
+            attendee,
+            suggestion: { contactId: contact.id, reason: 'Name match' },
+            rawTranscript: transcriptText,
+            rawText,
+          }),
+        );
+        queuedNameOnlyCount++;
+      }
+
+      // Queue unmatched attendees
+      for (const attendee of matches.unmatched) {
+        newQueueItems.push(
+          makeQueueItem({
+            noteId: note.id,
+            meetingTitle,
+            meetingDate: date,
+            attendee,
+            suggestion: null,
+            rawTranscript: transcriptText,
+            rawText,
+          }),
+        );
+        queuedUnmatchedCount++;
+      }
+    } else {
+      // No-name path: Granola only returned the user (or no attendees at all).
+      // Queue a single placeholder item for the meeting with empty attendee
+      // info. The ReviewQueueScreen renders these with a "no attendee name"
+      // flag and offers AI extraction or manual review.
       newQueueItems.push(
         makeQueueItem({
           noteId: note.id,
           meetingTitle,
           meetingDate: date,
-          attendee,
+          attendee: { name: '', email: '' },
           suggestion: null,
           rawTranscript: transcriptText,
           rawText,
         }),
       );
-      queuedUnmatchedCount++;
+      queuedNoNameCount++;
     }
 
     newProcessed.add(note.id);
   }
 
-  // 3) Commit, push to queue, persist
   if (typeof onCommit === 'function') {
     onCommit(updated);
   }
@@ -223,8 +254,8 @@ export async function runGranolaSync({
   const now = new Date().toISOString();
   await AsyncStorage.setItem(GRANOLA_LAST_SYNC_STORAGE, now);
 
-  // 4) Build summary
-  const queuedTotal = queuedNameOnlyCount + queuedUnmatchedCount;
+  const queuedTotal =
+    queuedNameOnlyCount + queuedUnmatchedCount + queuedNoNameCount;
   const parts = [];
   if (appendedCount > 0) {
     parts.push(`${appendedCount} log ${appendedCount === 1 ? 'entry' : 'entries'} added`);

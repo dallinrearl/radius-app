@@ -17,7 +17,7 @@ const TOTAL_STEPS = 5;
 const SLIDES = [
   {
     label: 'WELCOME',
-    headline: 'Welcome to Radius.',
+    headline: 'Welcome to Veery.',
     body: 'A personal relationship manager for the people who matter most.',
   },
   {
@@ -144,7 +144,7 @@ export default function OnboardingScreen({
           <Headline theme={theme} text="Want a few sample contacts?" />
           <Body
             theme={theme}
-            text="We can drop in two examples so you can see how Radius works. Clear them anytime."
+            text="We can drop in two examples so you can see how Veery works. Clear them anytime."
           />
         </View>
         <Footer
@@ -271,7 +271,7 @@ function UseTypePhase({ theme, stepNum, useType, toggleUseType }) {
   return (
     <View style={{ flex: 1, justifyContent: 'center', maxWidth: 560 }}>
       <StepLabel theme={theme} text={`${pad(stepNum)} — HOW YOU'LL USE IT`} />
-      <Headline theme={theme} text="How will you use Radius?" />
+      <Headline theme={theme} text="How will you use Veery?" />
       <Body
         theme={theme}
         text="Pick one or both. We'll tailor the tags and prompts to fit how you connect."

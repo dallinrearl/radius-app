@@ -1,21 +1,121 @@
 // All shared constants, default data, and config
 
-export const DEFAULT_TAGS = [
-  'Investor', 'Partner', 'Lender', 'Advisor',
-  'Family Office', 'RIA', 'Colleague', 'Friend',
+// ---------- Tags ----------
+//
+// Tags are grouped into categories that render as subsections on the form.
+// Each tag has a stable `v` (value, stored on contacts) and a `l` (display
+// label). The grouping is UI-only; downstream code just sees the flat list
+// of tag values via `DEFAULT_TAGS`.
+
+export const TAG_GROUPS = [
+  {
+    key: 'personal',
+    label: 'Personal',
+    tags: [
+      { v: 'friend', l: 'Friend' },
+      { v: 'colleague', l: 'Colleague' },
+      { v: 'mentor', l: 'Mentor' },
+    ],
+  },
+  {
+    key: 'capital',
+    label: 'Capital',
+    tags: [
+      { v: 'investor', l: 'Investor' },
+      { v: 'lp', l: 'LP' },
+      { v: 'gp', l: 'GP' },
+      { v: 'family_office', l: 'Family Office' },
+      { v: 'endowment_foundation', l: 'Endowment / Foundation' },
+      { v: 'pension_fund', l: 'Pension Fund' },
+      { v: 'fund_admin', l: 'Fund Admin' },
+      { v: 'placement_agent', l: 'Placement Agent' },
+      { v: 'ria', l: 'RIA' },
+      { v: 'portfolio_company', l: 'Portfolio Company' },
+    ],
+  },
+  {
+    key: 'real_estate',
+    label: 'Real Estate',
+    tags: [
+      { v: 're_investor', l: 'RE Investor' },
+      { v: 'property_manager', l: 'Property Manager' },
+      { v: 'agent_broker', l: 'Agent / Broker' },
+      { v: 'buyer', l: 'Buyer' },
+      { v: 'seller', l: 'Seller' },
+      { v: 'lender', l: 'Lender' },
+      { v: 'inspector', l: 'Inspector' },
+      { v: 'title_escrow', l: 'Title / Escrow' },
+      { v: 'contractor', l: 'Contractor' },
+    ],
+  },
+  {
+    key: 'service_provider',
+    label: 'Service Provider',
+    tags: [
+      { v: 'client', l: 'Client' },
+      { v: 'vendor_supplier', l: 'Vendor / Supplier' },
+      { v: 'advisor', l: 'Advisor' },
+      { v: 'recruiter', l: 'Recruiter' },
+    ],
+  },
 ];
 
+// Flat list of tag values, derived from the groups. Existing code that
+// iterates `DEFAULT_TAGS` (selectors, filters, search) keeps working.
+export const DEFAULT_TAGS = TAG_GROUPS.flatMap((g) => g.tags.map((t) => t.v));
+
+// Lookup helper: tag value -> display label. Falls back to the value
+// itself for legacy tags or custom user-added tags.
+export const TAG_LABELS = TAG_GROUPS.reduce((acc, g) => {
+  for (const t of g.tags) acc[t.v] = t.l;
+  return acc;
+}, {});
+
+export function getTagLabel(v) {
+  if (!v) return '';
+  return TAG_LABELS[v] || v;
+}
+
+// Per-tag colors. Each tag gets its own color so the pills look distinct
+// even when grouped. Colors are loosely themed per group but each tag is
+// still uniquely identifiable.
 export const TAG_COLORS = {
-  Investor: '#00C9A7',
-  Partner: '#0077B6',
-  Lender: '#48B8E0',
-  Advisor: '#7B5EEA',
-  'Family Office': '#F4A261',
-  RIA: '#2196A8',
-  Colleague: '#6B7FBA',
-  Friend: '#E060A0',
+  // Personal — warm pinks / coral
+  friend: '#E060A0',
+  colleague: '#D87090',
+  mentor: '#C85890',
+
+  // Capital — greens / teals
+  investor: '#00C9A7',
+  lp: '#20B89A',
+  gp: '#40A790',
+  family_office: '#5FB48A',
+  endowment_foundation: '#7DAF7F',
+  pension_fund: '#3A9D8F',
+  fund_admin: '#2D8C7C',
+  placement_agent: '#4FB3A0',
+  ria: '#2196A8',
+  portfolio_company: '#1D7F8C',
+
+  // Real Estate — blues / earth tones
+  re_investor: '#0077B6',
+  property_manager: '#3D8FC5',
+  agent_broker: '#48B8E0',
+  buyer: '#6B7FBA',
+  seller: '#8C7DB8',
+  lender: '#5D6FAC',
+  inspector: '#7090C0',
+  title_escrow: '#5A8FB0',
+  contractor: '#A57B5F',
+
+  // Service Provider — purples / golds
+  client: '#7B5EEA',
+  vendor_supplier: '#9070D0',
+  advisor: '#B060D0',
+  recruiter: '#F4A261',
 };
 
+// Custom (user-added) tag colors. Cycled through in order.
 export const CUSTOM_TAG_COLORS = [
   '#E06090', '#40B890', '#D4A040', '#6090D0', '#B060D0',
   '#50C0C0', '#D07040', '#80B040', '#C05070', '#5080C0',
@@ -84,17 +184,12 @@ export const CITIES = [
 ];
 
 // ---------- Phone / Email / Address label presets ----------
-//
-// Defaults shown in the picker. Users can also type custom labels.
 
 export const PHONE_LABELS  = ['Cell', 'Work', 'Home', 'Other'];
 export const EMAIL_LABELS  = ['Personal', 'Work', 'Other'];
 export const ADDRESS_LABELS = ['Home', 'Work', 'Vacation', 'Mailing', 'Other'];
 
 // ---------- Empty entry factories ----------
-//
-// Use these instead of inlining shapes so all the new contact fields are
-// created the same way everywhere.
 
 export const emptyPhone = () => ({ label: 'Cell', value: '' });
 export const emptyEmail = () => ({ label: 'Personal', value: '' });
@@ -109,55 +204,39 @@ export const emptyAddress = () => ({
 });
 
 // ---------- EMPTY_CONTACT ----------
-//
-// Adds new multi-entry fields (phones, emails, addresses) and mailing-list
-// support. Keeps the legacy `phone` and `email` string fields for backward
-// compatibility while migration is in progress; new code should read from
-// the array fields. See `migrateLegacyContact` below.
-//
-// Date fields (birthday, anniversary) are flexible strings:
-//   - 'YYYY-MM-DD' (full date)
-//   - 'MM-DD'      (no year, e.g. '06-15')
-//   - ''           (not set)
-// See `parseFlexibleDate` below for parsing.
 
 export const EMPTY_CONTACT = {
-  // Identity
-  name: '', company: '', role: '', linkedin: '',
+  firstName: '', lastName: '', company: '', role: '',
 
-  // Legacy single fields (kept for backward compat; migration moves them
-  // into `phones` / `emails` on read).
   phone: '',
   email: '',
 
-  // New multi-entry fields. First entry in each array is treated as the
-  // primary / default.
-  phones: [],     // [{ label, value }]
-  emails: [],     // [{ label, value }]
-  addresses: [],  // [{ label, line1, line2, city, state, zip, country }]
+  phones: [],
+  emails: [],
+  addresses: [],
 
-  // Relationship context
-  howMet: '', howHelp: '', topics: '', notes: '', lastContacted: '',
-  tags: [], freq: 'never', priority: false,
+  initialIntroduction: '',
+  notes: '',
+  lastContacted: '',
+  tags: [],
+  freq: 'never',
+  customFollowUpDate: '',
+  priority: false,
 
-  // Personal details
-  birthday: '',     // flexible: 'YYYY-MM-DD' or 'MM-DD'
+  birthday: '',
   timezone: '', location: '',
   hometown: '',
-  married: null,    // null | 'married' | 'single' | etc.
+  married: null,
   spouseName: '',
-  anniversary: '',  // flexible: 'YYYY-MM-DD' or 'MM-DD'. Preserved if married toggles off.
+  anniversary: '',
   kids: [],
   interests: [],
 
-  // Career
   experience: '', pastCompanies: [],
 
-  // Mailing list / cards
-  recipientName: '',  // override for mailing labels; falls back to `name`
-  mailingLists: [],   // array of mailing list ids the contact belongs to
+  recipientName: '',
+  mailingLists: [],
 
-  // System
   photo: '',
   convLog: [],
   archived: false,
@@ -165,11 +244,30 @@ export const EMPTY_CONTACT = {
   sampleAddedAt: null,
 };
 
+// ---------- Display name helper ----------
+
+export function getDisplayName(c) {
+  if (!c || typeof c !== 'object') return '';
+  const first = (c.firstName || '').trim();
+  const last = (c.lastName || '').trim();
+  if (first || last) return [first, last].filter(Boolean).join(' ');
+  if (typeof c.name === 'string') return c.name.trim();
+  return '';
+}
+
+export function splitLegacyName(s) {
+  if (!s || typeof s !== 'string') return { firstName: '', lastName: '' };
+  const trimmed = s.trim();
+  if (!trimmed) return { firstName: '', lastName: '' };
+  const idx = trimmed.indexOf(' ');
+  if (idx < 0) return { firstName: trimmed, lastName: '' };
+  return {
+    firstName: trimmed.slice(0, idx),
+    lastName: trimmed.slice(idx + 1).trim(),
+  };
+}
+
 // ---------- Flexible date helpers ----------
-//
-// Birthday and anniversary accept either 'YYYY-MM-DD' or 'MM-DD'. These
-// helpers let you check format, extract month/day, and produce a Date for
-// the next upcoming occurrence (useful for reminders, sorting).
 
 const FULL_DATE_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
 const MONTH_DAY_RE = /^(\d{2})-(\d{2})$/;
@@ -205,9 +303,6 @@ function isValidMonthDay(month, day) {
   return true;
 }
 
-// Format a flexible date for display. Returns '' if not parseable.
-//   '1990-06-15' -> 'Jun 15, 1990'
-//   '06-15'      -> 'Jun 15'
 export function formatFlexibleDate(s) {
   const parts = parseFlexibleDate(s);
   if (!parts) return '';
@@ -217,15 +312,55 @@ export function formatFlexibleDate(s) {
   return `${monthName} ${parts.day}`;
 }
 
+export function partsToFlexibleDate(mm, dd, yyyy) {
+  const month = parseInt(mm, 10);
+  const day = parseInt(dd, 10);
+  if (!isValidMonthDay(month, day)) return '';
+  const mmStr = String(month).padStart(2, '0');
+  const ddStr = String(day).padStart(2, '0');
+  const yearStr = (yyyy || '').toString().trim();
+  if (yearStr && /^\d{4}$/.test(yearStr)) {
+    return `${yearStr}-${mmStr}-${ddStr}`;
+  }
+  return `${mmStr}-${ddStr}`;
+}
+
+export function flexibleDateToParts(s) {
+  const parts = parseFlexibleDate(s);
+  if (!parts) return { mm: '', dd: '', yyyy: '' };
+  return {
+    mm: String(parts.month).padStart(2, '0'),
+    dd: String(parts.day).padStart(2, '0'),
+    yyyy: parts.hasYear ? String(parts.year) : '',
+  };
+}
+
 // ---------- Migration helper ----------
-//
-// Takes a contact in any historical shape and returns it in the current
-// shape. Idempotent — safe to call on already-migrated contacts.
 
 export function migrateLegacyContact(c) {
   if (!c || typeof c !== 'object') return c;
 
   const out = { ...c };
+
+  if (typeof out.firstName !== 'string') out.firstName = '';
+  if (typeof out.lastName !== 'string') out.lastName = '';
+  if (!out.firstName && !out.lastName && typeof out.name === 'string' && out.name.trim()) {
+    const split = splitLegacyName(out.name);
+    out.firstName = split.firstName;
+    out.lastName = split.lastName;
+  }
+
+  if (typeof out.initialIntroduction !== 'string') {
+    out.initialIntroduction = typeof out.howMet === 'string' ? out.howMet : '';
+  }
+  delete out.howMet;
+
+  delete out.howHelp;
+  delete out.linkedin;
+  delete out.topics;
+
+  if (typeof out.notes !== 'string') out.notes = '';
+  if (typeof out.customFollowUpDate !== 'string') out.customFollowUpDate = '';
 
   if (!Array.isArray(out.phones)) out.phones = [];
   if (out.phones.length === 0 && typeof out.phone === 'string' && out.phone.trim()) {
@@ -279,7 +414,6 @@ export const TOUCH_TYPES = [
   { v: 'text', l: 'Text', c: '#7B5EEA' },
   { v: 'meeting', l: 'In Person', c: '#F4A261' },
   { v: 'linkedin', l: 'LinkedIn', c: '#0077B6' },
-  { v: 'gift', l: 'Gift', c: '#E76F8E' },
   { v: 'other', l: 'Other', c: '#6A8098' },
 ];
 
@@ -291,53 +425,21 @@ export const TEMPLATE_TYPES = [
   { v: 'share', l: 'Share Value', desc: 'Send something useful' },
 ];
 
-// ---------- Gift Vault ----------
-//
-// Predefined gift categories shown as filter pills in the Gift Vault
-// screen. The 'custom' bucket catches anything that doesn't fit a
-// specific occasion.
-
-export const GIFT_CATEGORIES = [
-  { v: 'baby',      l: 'New Baby',  c: '#F4A8C8' },
-  { v: 'birthday',  l: 'Birthday',  c: '#F4A261' },
-  { v: 'wedding',   l: 'Wedding',   c: '#7B5EEA' },
-  { v: 'sympathy',  l: 'Sympathy',  c: '#6A8098' },
-  { v: 'thank_you', l: 'Thank You', c: '#00C9A7' },
-  { v: 'custom',    l: 'Custom',    c: '#48B8E0' },
-];
-
-// Look up a category record by its `v` value. Falls back to 'custom'
-// so callers never get undefined.
-export function giftCategoryMeta(value) {
-  return (
-    GIFT_CATEGORIES.find((c) => c.v === value) ||
-    GIFT_CATEGORIES[GIFT_CATEGORIES.length - 1]
-  );
-}
-
 // ---------- Sample contacts ----------
-//
-// Two universal sample contacts — one personal, one professional — that
-// work for any user regardless of industry or use type. Marked with
-// `isSample: true` and `sampleAddedAt` so they can be cleaned up later.
-//
-// Inserted only when the user opts in during onboarding (or via a manual
-// "Add samples" action in Settings later).
 
 export function getSampleContacts(addDays, isoToday) {
   const t = isoToday();
   const sampleAddedAt = new Date().toISOString();
 
   return [
-    // ---------- Personal: close friend from college ----------
     {
       ...EMPTY_CONTACT,
       id: 'sample_maya',
-      name: 'Maya Patel',
+      firstName: 'Maya',
+      lastName: 'Patel',
       company: '',
       role: '',
 
-      // Multi-entry contact info (legacy strings kept in sync).
       phone: '(512) 555-0142',
       email: 'maya.patel@example.com',
       phones: [{ label: 'Cell', value: '(512) 555-0142' }],
@@ -354,22 +456,21 @@ export function getSampleContacts(addDays, isoToday) {
       }],
       recipientName: 'The Patel Family',
 
-      howMet: 'College roommate. Stood up at her wedding.',
-      howHelp: '',
-      topics: "Pottery class, dad's retirement, planning a girls trip in spring",
+      initialIntroduction: 'College roommate. Stood up at her wedding.',
       notes: 'Allergic to shellfish. Loves audiobooks. Always brings the best wine.',
       lastContacted: addDays(t, -22),
-      tags: ['close_friend', 'college_friend'],
+      tags: ['friend'],
       freq: '1month',
+      customFollowUpDate: '',
       priority: false,
 
-      birthday: '03-18',           // year-optional format
+      birthday: '03-18',
       timezone: 'MT',
       location: 'Salt Lake City, UT',
       hometown: 'Austin, TX',
       married: 'married',
       spouseName: 'Raj',
-      anniversary: '2018-09-22',   // full date format
+      anniversary: '2018-09-22',
       kids: [
         { name: 'Arjun', age: '4', gender: 'boy', notes: 'Obsessed with dinosaurs and trains.' },
       ],
@@ -384,7 +485,7 @@ export function getSampleContacts(addDays, isoToday) {
       convLog: [{
         id: 'sample_maya_log_1',
         date: addDays(t, -22),
-        text: "Caught up over coffee. She's deep into a new pottery class and her dad just retired — he's planning a long trip to India.",
+        text: "Caught up over coffee. She's deep into a new pottery class and her dad just retired. He's planning a long trip to India.",
         type: 'meeting',
       }],
       archived: false,
@@ -392,11 +493,11 @@ export function getSampleContacts(addDays, isoToday) {
       sampleAddedAt,
     },
 
-    // ---------- Professional: mentor / advisor ----------
     {
       ...EMPTY_CONTACT,
       id: 'sample_marcus',
-      name: 'Marcus Johnson',
+      firstName: 'Marcus',
+      lastName: 'Johnson',
       company: 'Ridgeline Advisors',
       role: 'Senior Partner',
 
@@ -404,8 +505,6 @@ export function getSampleContacts(addDays, isoToday) {
       email: 'mjohnson@ridgelineadvisors.com',
       phones: [{ label: 'Work', value: '(303) 555-0287' }],
       emails: [{ label: 'Work', value: 'mjohnson@ridgelineadvisors.com' }],
-
-      linkedin: 'marcusjohnsonadvisor',
 
       addresses: [{
         label: 'Work',
@@ -418,21 +517,20 @@ export function getSampleContacts(addDays, isoToday) {
       }],
       recipientName: '',
 
-      howMet: 'Introduced by a former colleague at an industry event.',
-      howHelp: 'Decades of senior leadership perspective; great sounding board for big career moves.',
-      topics: 'Career transition, his new board seat, leadership succession at his firm',
+      initialIntroduction: 'Introduced by a former colleague at an industry event.',
       notes: 'Direct communicator. Prefers email over text. Reads everything you send him.',
       lastContacted: addDays(t, -42),
       tags: ['mentor', 'advisor'],
       freq: '3months',
-      priority: true,            // VIP
+      customFollowUpDate: '',
+      priority: true,
 
-      birthday: '1968-07-14',     // full date
+      birthday: '1968-07-14',
       timezone: 'MT',
       location: 'Denver, CO',
       hometown: 'Chicago, IL',
       married: 'married',
-      spouseName: '',             // intentionally blank
+      spouseName: '',
       anniversary: '',
       kids: [],
       interests: ['Cycling', 'Reading'],

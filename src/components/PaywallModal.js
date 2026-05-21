@@ -273,7 +273,7 @@ function getCopy(reason) {
   if (reason === 'business_card_scan') {
     return {
       headline: 'Pro feature',
-      body: 'Snap a photo of a business card and Radius will create the contact for you.',
+      body: 'Snap a photo of a business card and Veery will create the contact for you.',
       features: [
         'Vision AI extracts name, role, company, contact info',
         'Plus everything in Pro',
@@ -293,7 +293,7 @@ function getCopy(reason) {
   }
   return {
     headline: 'Upgrade to Pro',
-    body: 'Unlock unlimited AI features and the full Radius experience.',
+    body: 'Unlock unlimited AI features and the full Veery experience.',
     features: [
       'Unlimited AI insights, prep, and templates',
       'Granola AI processing',

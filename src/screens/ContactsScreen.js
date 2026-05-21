@@ -21,6 +21,7 @@ import {
   daysSince,
   fmtDate,
 } from '../utils/helpers';
+import { getDisplayName } from '../constants';
 
 const SAMPLE_BANNER_DAYS = 7;
 
@@ -51,9 +52,6 @@ export default function ContactsScreen({
   const [expandedCos, setExpandedCos] = useState({});
   const [showInbox, setShowInbox] = useState(false);
 
-  // ---------- Sample banner visibility ----------
-  // Show if: any active contact is a sample AND its sampleAddedAt is 7+
-  // days ago AND the user hasn't dismissed the banner.
   const sampleContacts = useMemo(
     () => activeContacts.filter((c) => c.isSample),
     [activeContacts],
@@ -98,9 +96,10 @@ export default function ContactsScreen({
     return activeContacts
       .filter((c) => {
         const s = q.toLowerCase();
+        const displayName = getDisplayName(c);
         if (
           s &&
-          !c.name.toLowerCase().includes(s) &&
+          !displayName.toLowerCase().includes(s) &&
           !(c.company || '').toLowerCase().includes(s) &&
           !(c.tags || []).some((t) => t.toLowerCase().includes(s))
         )
@@ -109,7 +108,7 @@ export default function ContactsScreen({
         return true;
       })
       .sort((a, b) => {
-        if (sort === 'name') return a.name.localeCompare(b.name);
+        if (sort === 'name') return getDisplayName(a).localeCompare(getDisplayName(b));
         if (sort === 'lastContacted')
           return (b.lastContacted || '').localeCompare(a.lastContacted || '');
         if (sort === 'added') return Number(b.id) - Number(a.id);
@@ -248,8 +247,6 @@ export default function ContactsScreen({
         contentContainerStyle={{ padding: 20, paddingBottom: 120 }}
         keyboardShouldPersistTaps="handled"
       >
-        {/* Fetch error banner. Shown when Supabase is unreachable so the
-            user knows their data isn't gone, just temporarily unavailable. */}
         {contactsFetchError ? (
           <View
             style={{
@@ -298,7 +295,6 @@ export default function ContactsScreen({
           </View>
         ) : null}
 
-        {/* Sample cleanup banner */}
         {showSampleBanner && (
           <View
             style={{
@@ -338,7 +334,6 @@ export default function ContactsScreen({
           </View>
         )}
 
-        {/* Search + Filter Toggle */}
         <View style={{ flexDirection: 'row', gap: 8, alignItems: 'center', marginBottom: 10 }}>
           <TextInput
             value={q}
@@ -378,38 +373,61 @@ export default function ContactsScreen({
         {filterOpen && (
           <View style={{ marginBottom: 12 }}>
             <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginBottom: 10 }}>
-              {['', ...allTags].map((t) => {
-                const cnt = t
-                  ? activeContacts.filter((c) => (c.tags || []).includes(t)).length
-                  : activeContacts.length;
-                const on = ftag === t;
-                const c = t ? getTagColor(t) : theme.t5;
-                return (
-                  <TouchableOpacity
-                    key={t || 'all'}
-                    onPress={() => setFtag(ftag === t ? '' : t)}
-                    style={{
-                      paddingHorizontal: 12,
-                      paddingVertical: 5,
-                      borderRadius: 20,
-                      borderWidth: 1,
-                      backgroundColor: on ? c + '22' : 'transparent',
-                      borderColor: on ? c : theme.brd2,
-                    }}
-                  >
-                    <Text
+              {(() => {
+                // Only show filter pills for tags assigned to at least one
+                // active contact. 'All' stays pinned at the front and shows
+                // the total tag-assignment count (a contact with N tags
+                // contributes N to the All count). Untagged contacts don't
+                // count toward All.
+                const usedTags = new Set();
+                let totalTagAssignments = 0;
+                for (const c of activeContacts) {
+                  if (Array.isArray(c.tags)) {
+                    for (const t of c.tags) {
+                      usedTags.add(t);
+                      totalTagAssignments += 1;
+                    }
+                  }
+                }
+                // Keep the currently active filter visible even if its
+                // count drops to 0 — otherwise the user is stuck with an
+                // invisible active filter and an empty list.
+                const tagsToShow = (allTags || []).filter(
+                  (t) => usedTags.has(t) || t === ftag,
+                );
+                return ['', ...tagsToShow].map((t) => {
+                  const cnt = t
+                    ? activeContacts.filter((c) => (c.tags || []).includes(t)).length
+                    : totalTagAssignments;
+                  const on = ftag === t;
+                  const c = t ? getTagColor(t) : theme.t5;
+                  return (
+                    <TouchableOpacity
+                      key={t || 'all'}
+                      onPress={() => setFtag(ftag === t ? '' : t)}
                       style={{
-                        fontSize: 10,
-                        fontWeight: '600',
-                        color: on ? c : theme.t5,
+                        paddingHorizontal: 12,
+                        paddingVertical: 5,
+                        borderRadius: 20,
+                        borderWidth: 1,
+                        backgroundColor: on ? c + '22' : 'transparent',
+                        borderColor: on ? c : theme.brd2,
                       }}
                     >
-                      {t || 'All'}
-                      {cnt > 0 ? ' (' + cnt + ')' : ''}
-                    </Text>
-                  </TouchableOpacity>
-                );
-              })}
+                      <Text
+                        style={{
+                          fontSize: 10,
+                          fontWeight: '600',
+                          color: on ? c : theme.t5,
+                        }}
+                      >
+                        {t || 'All'}
+                        {' (' + cnt + ')'}
+                      </Text>
+                    </TouchableOpacity>
+                  );
+                });
+              })()}
             </View>
             <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6 }}>
               {Object.entries(sortLabels).map(([k, l]) => {
@@ -462,8 +480,6 @@ export default function ContactsScreen({
           ))}
         </View>
 
-        {/* Empty state. Suppressed when there's a fetch error so we don't
-            tell the user "no contacts yet" when actually we just couldn't load. */}
         {!filtered.length && !contactsFetchError && (
           <View style={{ alignItems: 'center', paddingVertical: 50 }}>
             <View
@@ -568,7 +584,7 @@ export default function ContactsScreen({
           : filtered.map((c) => (
               <SwipeDeleteCard
                 key={c.id}
-                contactName={c.name}
+                contactName={getDisplayName(c)}
                 onDelete={() => onArchive(c)}
                 onLog={() => onLogTouch(c)}
               >
@@ -615,7 +631,7 @@ function ContactRow({ contact, onPress, theme }) {
       </View>
       <View style={{ flex: 1 }}>
         <Text style={{ fontSize: 13, color: theme.t1, fontWeight: '500' }} numberOfLines={1}>
-          {contact.name}
+          {getDisplayName(contact)}
         </Text>
         <Text style={{ fontSize: 11, color: theme.t5 }} numberOfLines={1}>
           {contact.role}
@@ -660,7 +676,7 @@ function ContactRowFull({ contact, onPress, theme }) {
       <View style={{ flex: 1 }}>
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
           <Text style={{ fontSize: 14, color: theme.t1, fontWeight: '500' }} numberOfLines={1}>
-            {contact.name}
+            {getDisplayName(contact)}
           </Text>
           {contact.priority && (
             <View
@@ -687,12 +703,12 @@ function ContactRowFull({ contact, onPress, theme }) {
             ))}
           </View>
         )}
-        {(contact.notes || contact.topics) && (
+        {contact.notes && (
           <Text
             style={{ fontSize: 11, color: theme.t6, marginTop: 3 }}
             numberOfLines={1}
           >
-            {(contact.notes || contact.topics || '').slice(0, 60)}
+            {contact.notes.slice(0, 60)}
           </Text>
         )}
       </View>
@@ -799,7 +815,7 @@ function NotificationInbox({ contacts, onPickContact, onClose, onLogToday }) {
                   />
                   <View style={{ flex: 1 }}>
                     <Text style={{ fontSize: 13, color: theme.t1, fontWeight: '500' }}>
-                      {c.name}
+                      {getDisplayName(c)}
                     </Text>
                     <Text style={{ fontSize: 11, color: theme.red }}>{d}d overdue</Text>
                   </View>
@@ -855,7 +871,7 @@ function NotificationInbox({ contacts, onPickContact, onClose, onLogToday }) {
                   style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: theme.warn }}
                 />
                 <Text style={{ fontSize: 13, color: theme.t1, fontWeight: '500', flex: 1 }}>
-                  {c.name}
+                  {getDisplayName(c)}
                 </Text>
                 <Text style={{ fontSize: 11, color: theme.warn }}>Today</Text>
               </TouchableOpacity>
@@ -896,7 +912,7 @@ function NotificationInbox({ contacts, onPickContact, onClose, onLogToday }) {
                     style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: theme.ac }}
                   />
                   <Text style={{ fontSize: 13, color: theme.t1, fontWeight: '500', flex: 1 }}>
-                    {c.name}
+                    {getDisplayName(c)}
                   </Text>
                   <Text style={{ fontSize: 11, color: theme.ac }}>
                     {d === 1 ? 'Tomorrow' : 'In ' + d + 'd'}
@@ -944,7 +960,7 @@ function NotificationInbox({ contacts, onPickContact, onClose, onLogToday }) {
                 />
                 <View style={{ flex: 1 }}>
                   <Text style={{ fontSize: 12, color: theme.t1, fontWeight: '500' }}>
-                    {r.contact.name}
+                    {getDisplayName(r.contact)}
                   </Text>
                   <Text style={{ fontSize: 11, color: theme.t5 }} numberOfLines={1}>
                     {r.note.text}

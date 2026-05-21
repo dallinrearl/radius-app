@@ -19,20 +19,27 @@ import {
   DEFAULT_INTERESTS,
 } from '../constants';
 import { TAGS as MASTER_TAGS, COMMON_TAG_LABELS } from '../constants/tagLibrary';
-import { mergeQueue, removeFromQueue, updateQueueItem } from '../utils/reviewQueue';
+import {
+  mergeQueue,
+  removeFromQueue,
+  updateQueueItem,
+  migrateUserAsAttendee,
+} from '../utils/reviewQueue';
+import { SUMMARY_LENGTH_OPTIONS, DEFAULT_SUMMARY_LENGTH } from '../utils/ai';
+import {
+  registerForPushNotifications,
+  clearPushNotificationToken,
+} from '../utils/notifications';
 
 const MASTER_TAG_LABELS = MASTER_TAGS.map((t) => t.label);
 
 const HOLIDAY_LIST_ID = 'holiday_card_list';
 
-// AsyncStorage key for the Granola review queue. Local-only for Stage 1;
-// will migrate to Supabase user_settings when Stage 2 cron arrives.
 const REVIEW_QUEUE_STORAGE = 'crm-review-queue';
+const QUEUE_MIGRATION_DONE_KEY = 'crm-queue-migration-self-attendee-done-v1';
 
-// AsyncStorage keys for gift vault. Local-only for now, mirrors the
-// mailing-list pattern. Will move to Supabase post-launch.
-const GIFTS_STORAGE = 'crm-gifts';
-const GIFT_GROUPS_STORAGE = 'crm-gift-groups';
+// AsyncStorage key for the meeting-summary length preference.
+const MEETING_SUMMARY_LENGTH_KEY = 'crm-meeting-summary-length';
 
 function newMailingList(name) {
   return {
@@ -40,31 +47,6 @@ function newMailingList(name) {
     name: name || 'Untitled List',
     createdAt: new Date().toISOString(),
     addressOverrides: {},
-  };
-}
-
-// Factory for a new gift entry. Categories match the predefined set:
-// 'baby' | 'birthday' | 'wedding' | 'sympathy' | 'thank_you' | 'custom'
-function newGift({ name, url, notes, category, photo } = {}) {
-  return {
-    id: 'gift_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6),
-    name: (name || '').trim(),
-    url: (url || '').trim(),
-    notes: (notes || '').trim(),
-    category: category || 'custom',
-    photo: photo || '',
-    createdAt: new Date().toISOString(),
-  };
-}
-
-// Factory for a gift group (a curated bundle of gift IDs).
-function newGiftGroup({ name, category, giftIds } = {}) {
-  return {
-    id: 'group_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6),
-    name: (name || 'Untitled Group').trim(),
-    category: category || 'custom',
-    giftIds: Array.isArray(giftIds) ? giftIds : [],
-    createdAt: new Date().toISOString(),
   };
 }
 
@@ -86,35 +68,18 @@ export function useAppStore() {
   const [samplesRequested, setSamplesRequestedState] = useState(null);
 
   const [mailingLists, setMailingLists] = useState([]);
-
-  // Whether the user has dismissed the "still using samples?" banner.
-  // Stored locally so it persists across sessions on the same device.
   const [samplesBannerDismissed, setSamplesBannerDismissedState] = useState(false);
-
-  // Granola review queue. Items needing user triage (name-only matches,
-  // unmatched attendees). Persisted to AsyncStorage for now.
   const [reviewQueue, setReviewQueue] = useState([]);
 
-  // Gift vault state. `gifts` = individual saved links. `giftGroups` =
-  // bundles that reference gifts by id (e.g. "Baby Shower Bundle" with
-  // a teether, a swaddle, and a book).
-  const [gifts, setGifts] = useState([]);
-  const [giftGroups, setGiftGroups] = useState([]);
+  const [meetingSummaryLength, setMeetingSummaryLengthState] = useState(DEFAULT_SUMMARY_LENGTH);
 
   const [loaded, setLoaded] = useState(false);
   const [saving, setSaving] = useState(false);
-  // Tracks fetch errors so the UI can distinguish "no contacts" from
-  // "couldn't load contacts". Null = no error, string = last error message.
   const [contactsFetchError, setContactsFetchError] = useState(null);
   const [contactsFetching, setContactsFetching] = useState(false);
 
-  // ---------- Tier / subscription state ----------
-  // Profile holds the user's tier, AI usage counter, trial state, Stripe IDs.
-  // Loaded from Supabase on auth, refreshed after upgrades / counter changes.
   const [profile, setProfile] = useState(null);
   const [profileLoading, setProfileLoading] = useState(false);
-  // Modal state — when AI cap is hit, this gets set to a reason string.
-  // Components read it to render the upgrade modal.
   const [paywallReason, setPaywallReason] = useState(null);
 
   useEffect(() => {
@@ -155,9 +120,6 @@ export function useAppStore() {
     refetchContacts();
   }, [userId, refetchContacts]);
 
-  // ---------- Profile / tier loading ----------
-  // Loads profile when userId changes. Also resets the AI counter if the
-  // last reset was in a previous calendar month.
   const refetchProfile = useCallback(async () => {
     if (!userId) {
       setProfile(null);
@@ -167,7 +129,6 @@ export function useAppStore() {
     try {
       let p = await fetchProfile();
       if (p && shouldResetAiCounter(p.ai_calls_reset_at)) {
-        // Auto-reset on month rollover. Background, fire-and-forget on error.
         try {
           p = await resetAiCounter();
         } catch (e) {
@@ -177,8 +138,6 @@ export function useAppStore() {
       setProfile(p);
     } catch (e) {
       console.warn('refetchProfile error:', e?.message);
-      // Don't block app on profile load failure. Default to a free-tier
-      // assumption locally (set below in the derived helpers).
       setProfile(null);
     }
     setProfileLoading(false);
@@ -196,9 +155,13 @@ export function useAppStore() {
       } catch (_) {
         setOnboarded(false);
       }
+      let loadedMyCard = null;
       try {
         const r = await storage.get('crm-mycard');
-        if (r?.value) setMyCard(JSON.parse(r.value));
+        if (r?.value) {
+          loadedMyCard = JSON.parse(r.value);
+          setMyCard(loadedMyCard);
+        }
       } catch (_) {}
       try {
         const r = await storage.get('crm-tags');
@@ -247,6 +210,13 @@ export function useAppStore() {
       } catch (_) {}
 
       try {
+        const r = await storage.get(MEETING_SUMMARY_LENGTH_KEY);
+        if (r?.value && SUMMARY_LENGTH_OPTIONS[r.value]) {
+          setMeetingSummaryLengthState(r.value);
+        }
+      } catch (_) {}
+
+      try {
         const r = await storage.get('crm-mailing-lists');
         if (r?.value) {
           setMailingLists(JSON.parse(r.value));
@@ -272,26 +242,32 @@ export function useAppStore() {
 
       try {
         const r = await storage.get(REVIEW_QUEUE_STORAGE);
+        let parsed = [];
         if (r?.value) {
-          const parsed = JSON.parse(r.value);
-          if (Array.isArray(parsed)) setReviewQueue(parsed);
+          try {
+            const v = JSON.parse(r.value);
+            if (Array.isArray(v)) parsed = v;
+          } catch (_) {}
         }
-      } catch (_) {}
 
-      // Load gifts and gift groups. Both arrays are local-only for now.
-      try {
-        const r = await storage.get(GIFTS_STORAGE);
-        if (r?.value) {
-          const parsed = JSON.parse(r.value);
-          if (Array.isArray(parsed)) setGifts(parsed);
+        const migrationDone = await storage.get(QUEUE_MIGRATION_DONE_KEY);
+        if (migrationDone?.value !== 'true' && parsed.length > 0) {
+          const { migrated, changedCount } = migrateUserAsAttendee(parsed, loadedMyCard);
+          if (changedCount > 0) {
+            console.log(
+              `[Veery] One-time queue migration: rewrote ${changedCount} self-attendee item${changedCount === 1 ? '' : 's'} as no-name.`,
+            );
+            parsed = migrated;
+            try {
+              await storage.set(REVIEW_QUEUE_STORAGE, JSON.stringify(parsed));
+            } catch (_) {}
+          }
+          try {
+            await storage.set(QUEUE_MIGRATION_DONE_KEY, 'true');
+          } catch (_) {}
         }
-      } catch (_) {}
-      try {
-        const r = await storage.get(GIFT_GROUPS_STORAGE);
-        if (r?.value) {
-          const parsed = JSON.parse(r.value);
-          if (Array.isArray(parsed)) setGiftGroups(parsed);
-        }
+
+        setReviewQueue(parsed);
       } catch (_) {}
 
       setLoaded(true);
@@ -373,7 +349,60 @@ export function useAppStore() {
     } catch (_) {}
   }, []);
 
-  // ---------- Sample cleanup ----------
+  const saveMeetingSummaryLength = useCallback(async (value) => {
+    if (!SUMMARY_LENGTH_OPTIONS[value]) {
+      console.warn('saveMeetingSummaryLength: invalid value', value);
+      return;
+    }
+    setMeetingSummaryLengthState(value);
+    try {
+      await storage.set(MEETING_SUMMARY_LENGTH_KEY, value);
+    } catch (_) {}
+  }, []);
+
+  // ---------- Push notifications ----------
+  //
+  // Three toggles live on the Supabase profiles row (not AsyncStorage)
+  // because the server-side cron job needs to read them when deciding
+  // whom to push to. Toggle UI in Settings reads/writes via the
+  // saveNotificationPrefs callback below.
+  //
+  // registerPushToken runs the permission-request and token-registration
+  // flow. Returns the status code so the caller can react (e.g., show a
+  // "permission denied" message).
+
+  const notificationsEnabled = !!profile?.notifications_enabled;
+  const notifOverdue = !!profile?.notif_overdue;
+  const notifBirthdays = !!profile?.notif_birthdays;
+  const hasPushToken = !!profile?.expo_push_token;
+
+  const saveNotificationPrefs = useCallback(
+    async (patch) => {
+      // patch is a partial object like { notifications_enabled: true }.
+      // Optimistically update local profile state, then persist.
+      setProfile((p) => (p ? { ...p, ...patch } : p));
+      try {
+        await updateProfile(patch);
+      } catch (e) {
+        console.warn('saveNotificationPrefs failed:', e?.message);
+        await refetchProfile();
+      }
+    },
+    [refetchProfile],
+  );
+
+  const registerPushToken = useCallback(async () => {
+    const result = await registerForPushNotifications();
+    if (result.status === 'ok') {
+      await refetchProfile();
+    }
+    return result;
+  }, [refetchProfile]);
+
+  const removePushToken = useCallback(async () => {
+    await clearPushNotificationToken();
+    await refetchProfile();
+  }, [refetchProfile]);
 
   const clearSampleContacts = useCallback(() => {
     const next = contacts.filter((c) => !c.isSample);
@@ -388,8 +417,6 @@ export function useAppStore() {
       await storage.set('crm-samples-banner-dismissed', 'true');
     } catch (_) {}
   }, []);
-
-  // ---------- Mailing list CRUD ----------
 
   const persistMailingLists = useCallback(async (next) => {
     setMailingLists(next);
@@ -471,13 +498,6 @@ export function useAppStore() {
     [contacts, commit],
   );
 
-  // ---------- Review queue (Granola sync) ----------
-  //
-  // The queue holds items where sync couldn't confidently match an attendee
-  // to a contact. The user triages each item from ReviewQueueScreen.
-  // Items are deduplicated by stable id (noteId + attendee key), so re-syncing
-  // the same meeting won't re-add items the user has already handled.
-
   const persistReviewQueue = useCallback(async (next) => {
     setReviewQueue(next);
     try {
@@ -485,7 +505,6 @@ export function useAppStore() {
     } catch (_) {}
   }, []);
 
-  // Add new items to the queue (deduplicated by id). Used by sync.
   const addToReviewQueue = useCallback(
     async (newItems) => {
       if (!Array.isArray(newItems) || newItems.length === 0) return;
@@ -495,7 +514,6 @@ export function useAppStore() {
     [reviewQueue, persistReviewQueue],
   );
 
-  // Remove a single item from the queue by id. Used after triage.
   const removeFromReviewQueue = useCallback(
     async (itemId) => {
       const next = removeFromQueue(reviewQueue, itemId);
@@ -504,7 +522,6 @@ export function useAppStore() {
     [reviewQueue, persistReviewQueue],
   );
 
-  // Patch a queue item in place (e.g. to attach AI suggestions before showing them).
   const patchReviewQueueItem = useCallback(
     async (itemId, patch) => {
       const next = updateQueueItem(reviewQueue, itemId, patch);
@@ -513,105 +530,9 @@ export function useAppStore() {
     [reviewQueue, persistReviewQueue],
   );
 
-  // Clear the entire queue. Used by Disconnect Granola.
   const clearReviewQueue = useCallback(async () => {
     await persistReviewQueue([]);
   }, [persistReviewQueue]);
-
-  // ---------- Gift Vault CRUD ----------
-  //
-  // Gifts are individual saved links (Amazon, Etsy, etc) with optional
-  // notes and a category. Gift groups are curated bundles that reference
-  // gifts by id. Both are local-only for now.
-
-  const persistGifts = useCallback(async (next) => {
-    setGifts(next);
-    try {
-      await storage.set(GIFTS_STORAGE, JSON.stringify(next));
-    } catch (_) {}
-  }, []);
-
-  const persistGiftGroups = useCallback(async (next) => {
-    setGiftGroups(next);
-    try {
-      await storage.set(GIFT_GROUPS_STORAGE, JSON.stringify(next));
-    } catch (_) {}
-  }, []);
-
-  const createGift = useCallback(
-    async (data) => {
-      const gift = newGift(data);
-      await persistGifts([...gifts, gift]);
-      return gift;
-    },
-    [gifts, persistGifts],
-  );
-
-  const updateGift = useCallback(
-    async (id, patch) => {
-      const next = gifts.map((g) => (g.id === id ? { ...g, ...patch } : g));
-      await persistGifts(next);
-    },
-    [gifts, persistGifts],
-  );
-
-  const deleteGift = useCallback(
-    async (id) => {
-      // Remove the gift itself.
-      const nextGifts = gifts.filter((g) => g.id !== id);
-      await persistGifts(nextGifts);
-      // Also strip the id from any group that referenced it, so groups
-      // never point to a dangling gift.
-      const nextGroups = giftGroups.map((grp) => {
-        if (!Array.isArray(grp.giftIds) || !grp.giftIds.includes(id)) return grp;
-        return { ...grp, giftIds: grp.giftIds.filter((x) => x !== id) };
-      });
-      const touched = nextGroups.some((g, i) => g !== giftGroups[i]);
-      if (touched) await persistGiftGroups(nextGroups);
-    },
-    [gifts, persistGifts, giftGroups, persistGiftGroups],
-  );
-
-  const createGiftGroup = useCallback(
-    async (data) => {
-      const group = newGiftGroup(data);
-      await persistGiftGroups([...giftGroups, group]);
-      return group;
-    },
-    [giftGroups, persistGiftGroups],
-  );
-
-  const updateGiftGroup = useCallback(
-    async (id, patch) => {
-      const next = giftGroups.map((g) => (g.id === id ? { ...g, ...patch } : g));
-      await persistGiftGroups(next);
-    },
-    [giftGroups, persistGiftGroups],
-  );
-
-  const deleteGiftGroup = useCallback(
-    async (id) => {
-      const next = giftGroups.filter((g) => g.id !== id);
-      await persistGiftGroups(next);
-    },
-    [giftGroups, persistGiftGroups],
-  );
-
-  // Toggle a gift's membership in a group. Used by the group editor.
-  const toggleGiftInGroup = useCallback(
-    async (groupId, giftId) => {
-      const next = giftGroups.map((g) => {
-        if (g.id !== groupId) return g;
-        const ids = Array.isArray(g.giftIds) ? g.giftIds : [];
-        const updated = ids.includes(giftId)
-          ? ids.filter((x) => x !== giftId)
-          : [...ids, giftId];
-        return { ...g, giftIds: updated };
-      });
-      await persistGiftGroups(next);
-    },
-    [giftGroups, persistGiftGroups],
-  );
 
   const allTags = [...MASTER_TAG_LABELS, ...customTags];
   const visibleTags = allTags.filter((t) => !hiddenTags.includes(t));
@@ -708,48 +629,31 @@ export function useAppStore() {
     return nd && daysUntil(nd) < 0;
   }).length;
 
-  // ---------- Tier derived state ----------
-  // Defaults to 'free' if profile hasn't loaded yet — fail closed, not open.
-  // This means the AI counter is conservative during first-load: better to
-  // briefly show "5 of 5 used" than to let a free user run unlimited calls
-  // because we couldn't fetch their profile.
   const tier = profile?.tier || TIERS.FREE;
   const aiCallsCount = profile?.ai_calls_count || 0;
   const trialExpiresAt = profile?.trial_expires_at || null;
   const trialActive = isTrialActive(tier, trialExpiresAt);
   const trialDaysLeft = trialDaysRemaining(tier, trialExpiresAt);
-  // Effective tier for feature gating: trial behaves like pro until it expires.
   const effectiveTier = trialActive ? TIERS.TRIAL : tier;
   const aiRemaining = aiCallsRemaining(effectiveTier, aiCallsCount);
   const canUseAi = canMakeAiCall(effectiveTier, aiCallsCount);
 
-  // Helper exposed to components: check a feature by key.
-  // e.g. featureUnlocked('granolaAiProcessing') -> false on free, true on pro
   function featureUnlocked(key) {
     return isFeatureUnlocked(effectiveTier, key);
   }
 
-  // ---------- AI usage actions ----------
-  // Wrapper for AI calls. Components call this BEFORE invoking the AI;
-  // returns true if the call is allowed (and increments the counter as a
-  // side effect for free users), false if blocked.
-  // If blocked, sets paywallReason so the upgrade modal renders.
   const consumeAiCall = useCallback(
     async (reason = 'ai_limit_reached') => {
       if (!canMakeAiCall(effectiveTier, aiCallsCount)) {
         setPaywallReason(reason);
         return false;
       }
-      // Pro / trial: unlimited, no counter increment needed.
       if (effectiveTier !== TIERS.FREE) return true;
-      // Free: increment counter. Update local state optimistically, then
-      // persist. If persist fails, log but allow the call (Optimistic UX).
       try {
         const updated = await incrementAiCounter();
         setProfile(updated);
       } catch (e) {
         console.warn('AI counter increment failed:', e?.message);
-        // Optimistic local fallback so the UI still updates
         setProfile((p) => (p ? { ...p, ai_calls_count: (p.ai_calls_count || 0) + 1 } : p));
       }
       return true;
@@ -759,7 +663,6 @@ export function useAppStore() {
 
   const dismissPaywall = useCallback(() => setPaywallReason(null), []);
 
-  // Trigger paywall manually (e.g. user tapped a locked Pro feature button).
   const showPaywall = useCallback((reason = 'pro_feature') => {
     setPaywallReason(reason);
   }, []);
@@ -788,22 +691,16 @@ export function useAppStore() {
     samplesBannerDismissed,
     mailingLists,
     reviewQueue,
-    // ---------- Gift Vault ----------
-    gifts,
-    giftGroups,
-    createGift,
-    updateGift,
-    deleteGift,
-    createGiftGroup,
-    updateGiftGroup,
-    deleteGiftGroup,
-    toggleGiftInGroup,
+    meetingSummaryLength,
+    notificationsEnabled,
+    notifOverdue,
+    notifBirthdays,
+    hasPushToken,
     loaded,
     saving,
     contactsFetchError,
     contactsFetching,
     refetchContacts,
-    // ---------- Tier / subscription ----------
     profile,
     profileLoading,
     refetchProfile,
@@ -834,6 +731,10 @@ export function useAppStore() {
     savePassword,
     saveUseType,
     saveSamplesRequested,
+    saveMeetingSummaryLength,
+    saveNotificationPrefs,
+    registerPushToken,
+    removePushToken,
     clearSampleContacts,
     dismissSamplesBanner,
     createMailingList,

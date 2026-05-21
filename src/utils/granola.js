@@ -184,14 +184,29 @@ function collectEmails(contact) {
   return out.filter(Boolean);
 }
 
-// Name match: normalize whitespace and casing, exact match on either
-// full name or "first last" reordering. Doesn't fuzzy beyond that,
-// we want false positives to be rare since this triggers a confirmation prompt.
+// Resolve a contact's display name from the firstName/lastName fields,
+// falling back to the legacy single `name` field. Must stay in sync with
+// displayNameOf() in ai.js — contacts created through the new extraction
+// flow only populate firstName/lastName, so matching on `name` alone
+// silently misses them.
+function contactDisplayName(contact) {
+  if (!contact) return '';
+  const composed = [contact.firstName, contact.lastName]
+    .filter((s) => typeof s === 'string' && s.trim())
+    .join(' ')
+    .trim();
+  if (composed) return composed;
+  return typeof contact.name === 'string' ? contact.name.trim() : '';
+}
+
+// Name match: normalize whitespace and casing, exact match on the
+// contact's display name. Doesn't fuzzy beyond that, we want false
+// positives to be rare since this triggers a confirmation prompt.
 function findContactByName(contacts, name) {
   const target = normalizeName(name);
   if (!target) return null;
   for (const c of contacts || []) {
-    const candidate = normalizeName(c?.name || '');
+    const candidate = normalizeName(contactDisplayName(c));
     if (candidate && candidate === target) return c;
   }
   return null;

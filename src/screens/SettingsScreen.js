@@ -41,17 +41,17 @@ import {
   COMMON_TAG_LABELS,
 } from '../constants/tagLibrary';
 import { testKey as granolaTestKey } from '../utils/granola';
-import { runGranolaSync } from '../utils/granolaSync';
+import { runGranolaSync, reprocessSelfOnlyItems } from '../utils/granolaSync';
 import { createPortalSession } from '../lib/stripeApi';
+import { PRIVACY_POLICY_URL, TERMS_OF_SERVICE_URL } from '../constants/legal';
+import { SUMMARY_LENGTH_OPTIONS, DEFAULT_SUMMARY_LENGTH } from '../utils/ai';
 import * as FileSystem from 'expo-file-system';
 import * as Sharing from 'expo-sharing';
-import * as Contacts from 'expo-contacts';
 
 const GRANOLA_KEY_STORAGE = 'crm-granola-key';
 const GRANOLA_LAST_SYNC_STORAGE = 'crm-granola-last-sync';
 const GRANOLA_PROCESSED_IDS_STORAGE = 'crm-granola-processed-ids';
 
-// Cross-platform confirm. Mirrors the pattern from DetailScreen / SwipeDeleteCard.
 function confirmAction(title, message, onConfirm, confirmLabel = 'OK') {
   if (Platform.OS === 'web') {
     if (typeof window !== 'undefined' && window.confirm) {
@@ -95,7 +95,6 @@ export default function SettingsScreen({
   onClearReviewQueue,
   onOpenReviewQueue,
   granolaAiUnlocked,
-  // Tier / subscription
   tier,
   effectiveTier,
   trialActive,
@@ -105,6 +104,16 @@ export default function SettingsScreen({
   hasStripeCustomer,
   onShowPaywall,
   onSignOut,
+  meetingSummaryLength,
+  onSaveMeetingSummaryLength,
+  // Notification preferences. Booleans live on the user's profile row.
+  notificationsEnabled,
+  notifOverdue,
+  notifBirthdays,
+  hasPushToken,
+  onSaveNotificationPrefs,
+  onRegisterPushToken,
+  onImportContactsPress,
 }) {
   const { theme, themeName, toggleTheme } = useTheme();
   const insets = useSafeAreaInsets();
@@ -115,7 +124,6 @@ export default function SettingsScreen({
     setOpenSection(openSection === s ? null : s);
   }
 
-  // ============== Subscription portal ==============
   async function openBillingPortal() {
     if (portalLoading) return;
     setPortalLoading(true);
@@ -134,64 +142,14 @@ export default function SettingsScreen({
     setPortalLoading(false);
   }
 
-  // ============== Data actions ==============
-  async function importContacts() {
-    const perm = await Contacts.requestPermissionsAsync();
-    if (perm.status !== 'granted') {
-      Alert.alert('Permission needed', 'Please allow Contacts access.');
-      return;
-    }
-    const { data } = await Contacts.getContactsAsync({
-      fields: [
-        Contacts.Fields.PhoneNumbers,
-        Contacts.Fields.Emails,
-        Contacts.Fields.Company,
-        Contacts.Fields.JobTitle,
-      ],
-    });
-    if (!data?.length) {
-      Alert.alert('No contacts found');
-      return;
-    }
-    const newOnes = data
-      .filter((d) => d.name)
-      .map((d, i) => ({
-        id: 'imp_' + Date.now() + '_' + i,
-        name: d.name,
-        company: d.company || '',
-        role: d.jobTitle || '',
-        phone: d.phoneNumbers?.[0]?.number || '',
-        email: d.emails?.[0]?.email || '',
-        howMet: '',
-        howHelp: '',
-        topics: '',
-        notes: '',
-        lastContacted: '',
-        tags: [],
-        freq: 'never',
-        priority: false,
-        birthday: '',
-        timezone: '',
-        location: '',
-        hometown: '',
-        married: null,
-        spouseName: '',
-        kids: [],
-        interests: [],
-        experience: '',
-        pastCompanies: [],
-        photo: '',
-        convLog: [],
-        archived: false,
-      }));
-    onCommit([...contacts, ...newOnes]);
-    showToast('Imported ' + newOnes.length + ' contacts', theme.ac);
-  }
+  // Import from phone contacts is handled by the dedicated picker screen
+  // (AddScreen 'import' mode), reached via onImportContactsPress. We no
+  // longer bulk-import the entire address book from here.
 
   async function exportAll() {
     try {
       const allVcf = contacts.filter((c) => !c.archived).map(makeVcf).join('\r\n');
-      const path = FileSystem.cacheDirectory + 'radius_contacts.vcf';
+      const path = FileSystem.cacheDirectory + 'veery_contacts.vcf';
       await FileSystem.writeAsStringAsync(path, allVcf);
       if (await Sharing.isAvailableAsync()) {
         await Sharing.shareAsync(path, { mimeType: 'text/vcard' });
@@ -213,7 +171,7 @@ export default function SettingsScreen({
         mailingLists,
         exportedAt: new Date().toISOString(),
       });
-      const path = FileSystem.cacheDirectory + 'radius_backup.json';
+      const path = FileSystem.cacheDirectory + 'veery_backup.json';
       await FileSystem.writeAsStringAsync(path, data);
       if (await Sharing.isAvailableAsync()) {
         await Sharing.shareAsync(path, { mimeType: 'application/json' });
@@ -223,7 +181,6 @@ export default function SettingsScreen({
     }
   }
 
-  // ============== Danger zone actions ==============
   function handleDeleteAllContacts() {
     confirmAction(
       'Delete all contacts',
@@ -276,6 +233,11 @@ export default function SettingsScreen({
 
   const listsCount = Array.isArray(mailingLists) ? mailingLists.length : 0;
 
+  const currentSummaryLength =
+    meetingSummaryLength && SUMMARY_LENGTH_OPTIONS[meetingSummaryLength]
+      ? meetingSummaryLength
+      : DEFAULT_SUMMARY_LENGTH;
+
   return (
     <View style={{ flex: 1, backgroundColor: theme.bg }}>
       <ScrollView
@@ -297,9 +259,6 @@ export default function SettingsScreen({
           Settings
         </Text>
 
-        {/* ============================================================
-            ACCOUNT (profile header card — myCard + subscription)
-            ============================================================ */}
         <SectionLabel theme={theme} text="Account" />
 
         <SettingsSection
@@ -399,9 +358,6 @@ export default function SettingsScreen({
           <ChevronRight size={16} color={theme.t5} />
         </TouchableOpacity>
 
-        {/* ============================================================
-            PREFERENCES (Appearance + Notifications stub)
-            ============================================================ */}
         <SectionLabel theme={theme} text="Preferences" />
 
         <View
@@ -431,16 +387,108 @@ export default function SettingsScreen({
           <Toggle value={themeName === 'dark'} onValueChange={toggleTheme} color={theme.purp} />
         </View>
 
-        <ComingSoonRow
-          theme={theme}
+        {/* Notifications: collapsible section with global on/off and per-type toggles */}
+        <SettingsSection
           icon={<RefreshIcon size={18} color={theme.info} />}
           title="Notifications"
-          subtitle="Reminders, daily digest, birthdays"
-        />
+          subtitle={
+            notificationsEnabled
+              ? buildNotifSubtitle(notifOverdue, notifBirthdays)
+              : 'Off'
+          }
+          open={openSection === 'notifications'}
+          onPress={() => toggleSection('notifications')}
+        >
+          <NotificationsBody
+            theme={theme}
+            notificationsEnabled={notificationsEnabled}
+            notifOverdue={notifOverdue}
+            notifBirthdays={notifBirthdays}
+            hasPushToken={hasPushToken}
+            onSaveNotificationPrefs={onSaveNotificationPrefs}
+            onRegisterPushToken={onRegisterPushToken}
+            showToast={showToast}
+          />
+        </SettingsSection>
 
-        {/* ============================================================
-            ORGANIZATION (Tags / Interests / Mailing Lists)
-            ============================================================ */}
+        <SectionLabel theme={theme} text="AI" />
+
+        <SettingsSection
+          icon={<ChatIcon size={18} color={theme.purp} />}
+          title="Meeting Summary Length"
+          subtitle={SUMMARY_LENGTH_OPTIONS[currentSummaryLength].label}
+          open={openSection === 'ai_summary_length'}
+          onPress={() => toggleSection('ai_summary_length')}
+        >
+          <View style={{ padding: 14, gap: 8 }}>
+            <Text style={{ fontSize: 11, color: theme.t5, lineHeight: 16, marginBottom: 4 }}>
+              How AI summarizes meeting transcripts when you import notes or process Granola
+              meetings. Applies to future summaries, not existing ones.
+            </Text>
+            {Object.values(SUMMARY_LENGTH_OPTIONS).map((opt) => {
+              const selected = opt.key === currentSummaryLength;
+              return (
+                <TouchableOpacity
+                  key={opt.key}
+                  onPress={() => onSaveMeetingSummaryLength && onSaveMeetingSummaryLength(opt.key)}
+                  activeOpacity={0.7}
+                  style={{
+                    paddingVertical: 11,
+                    paddingHorizontal: 12,
+                    borderRadius: 12,
+                    borderWidth: 1,
+                    backgroundColor: selected ? theme.purp + '15' : theme.bg3,
+                    borderColor: selected ? theme.purp + '60' : theme.brd,
+                    flexDirection: 'row',
+                    alignItems: 'flex-start',
+                    gap: 10,
+                  }}
+                >
+                  <View
+                    style={{
+                      width: 16,
+                      height: 16,
+                      borderRadius: 8,
+                      borderWidth: 2,
+                      borderColor: selected ? theme.purp : theme.brd2,
+                      backgroundColor: selected ? theme.purp : 'transparent',
+                      marginTop: 2,
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                    }}
+                  >
+                    {selected ? (
+                      <View
+                        style={{
+                          width: 6,
+                          height: 6,
+                          borderRadius: 3,
+                          backgroundColor: '#fff',
+                        }}
+                      />
+                    ) : null}
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Text
+                      style={{
+                        fontSize: 13,
+                        fontWeight: '600',
+                        color: selected ? theme.purp : theme.t1,
+                        marginBottom: 2,
+                      }}
+                    >
+                      {opt.label}
+                    </Text>
+                    <Text style={{ fontSize: 11, color: theme.t5, lineHeight: 15 }}>
+                      {opt.description}
+                    </Text>
+                  </View>
+                </TouchableOpacity>
+              );
+            })}
+          </View>
+        </SettingsSection>
+
         <SectionLabel theme={theme} text="Organization" />
 
         <SettingsSection
@@ -501,9 +549,6 @@ export default function SettingsScreen({
           <ChevronRight size={16} color={theme.t5} />
         </TouchableOpacity>
 
-        {/* ============================================================
-            INTEGRATIONS (Granola only for now)
-            ============================================================ */}
         <SectionLabel theme={theme} text="Integrations" />
 
         <SettingsSection
@@ -520,6 +565,7 @@ export default function SettingsScreen({
             showToast={showToast}
             reviewQueue={reviewQueue}
             onAddToReviewQueue={onAddToReviewQueue}
+            onRemoveFromReviewQueue={onRemoveFromReviewQueue}
             onClearReviewQueue={onClearReviewQueue}
             onOpenReviewQueue={onOpenReviewQueue}
             granolaAiUnlocked={granolaAiUnlocked}
@@ -540,9 +586,6 @@ export default function SettingsScreen({
           subtitle="Snap a card, get a contact (Pro)"
         />
 
-        {/* ============================================================
-            DATA
-            ============================================================ */}
         <SectionLabel theme={theme} text="Data" />
 
         <SettingsSection
@@ -556,7 +599,7 @@ export default function SettingsScreen({
             <DataRow
               icon={<UsersIcon size={16} color={theme.ac} />}
               label="Import from Phone Contacts"
-              onPress={importContacts}
+              onPress={onImportContactsPress}
             />
             <DataRow
               icon={<DownloadIcon size={16} color={theme.info} />}
@@ -628,9 +671,6 @@ export default function SettingsScreen({
           </View>
         </SettingsSection>
 
-        {/* ============================================================
-            HELP & ABOUT
-            ============================================================ */}
         <SectionLabel theme={theme} text="Help & About" />
 
         <TouchableOpacity
@@ -660,7 +700,7 @@ export default function SettingsScreen({
         </TouchableOpacity>
 
         <TouchableOpacity
-          onPress={() => Linking.openURL('mailto:dallinrearl@gmail.com?subject=Radius feedback')}
+          onPress={() => Linking.openURL('mailto:veeryapp@gmail.com?subject=Veery feedback')}
           style={{
             backgroundColor: theme.bg2,
             borderWidth: 1,
@@ -685,6 +725,52 @@ export default function SettingsScreen({
           <ChevronRight size={16} color={theme.t5} />
         </TouchableOpacity>
 
+        <TouchableOpacity
+          onPress={() => Linking.openURL(PRIVACY_POLICY_URL)}
+          style={{
+            backgroundColor: theme.bg2,
+            borderWidth: 1,
+            borderColor: theme.brd,
+            borderRadius: 14,
+            padding: 14,
+            marginBottom: 10,
+            flexDirection: 'row',
+            alignItems: 'center',
+            gap: 12,
+          }}
+        >
+          <LockIcon size={18} color={theme.t4} />
+          <View style={{ flex: 1 }}>
+            <Text style={{ color: theme.t1, fontSize: 14, fontWeight: '500' }}>
+              Privacy Policy
+            </Text>
+          </View>
+          <ChevronRight size={16} color={theme.t5} />
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          onPress={() => Linking.openURL(TERMS_OF_SERVICE_URL)}
+          style={{
+            backgroundColor: theme.bg2,
+            borderWidth: 1,
+            borderColor: theme.brd,
+            borderRadius: 14,
+            padding: 14,
+            marginBottom: 10,
+            flexDirection: 'row',
+            alignItems: 'center',
+            gap: 12,
+          }}
+        >
+          <CardIcon size={18} color={theme.t4} />
+          <View style={{ flex: 1 }}>
+            <Text style={{ color: theme.t1, fontSize: 14, fontWeight: '500' }}>
+              Terms of Service
+            </Text>
+          </View>
+          <ChevronRight size={16} color={theme.t5} />
+        </TouchableOpacity>
+
         <View
           style={{
             backgroundColor: theme.bg2,
@@ -696,12 +782,8 @@ export default function SettingsScreen({
             alignItems: 'center',
           }}
         >
-          <Text style={{ color: theme.t6, fontSize: 11 }}>Radius v1.0</Text>
+          <Text style={{ color: theme.t6, fontSize: 11 }}>Veery v1.0</Text>
         </View>
-
-        {/* ============================================================
-            BOTTOM ACTIONS (Sign out + destructive resets)
-            ============================================================ */}
 
         <TouchableOpacity
           onPress={handleSignOut}
@@ -782,9 +864,215 @@ export default function SettingsScreen({
   );
 }
 
+// Build the subtitle that shows under the Notifications header.
+// "All on", "Off", or "Only Overdue", "Only Birthdays" when partial.
+function buildNotifSubtitle(notifOverdue, notifBirthdays) {
+  if (notifOverdue && notifBirthdays) return 'All types on';
+  if (notifOverdue && !notifBirthdays) return 'Overdue only';
+  if (!notifOverdue && notifBirthdays) return 'Birthdays only';
+  return 'No types enabled';
+}
+
 // ============================================================
-// Section label (small uppercase header above each group)
+// Notifications body
 // ============================================================
+//
+// Top row: global on/off switch. When the user flips it on for the first
+// time we trigger the permission request via onRegisterPushToken. If the
+// permission flow fails or the user denies, we flip the switch back off
+// and show a helpful message.
+//
+// Below the global switch: two per-type toggles (Overdue, Birthdays).
+// When global is off, the per-type rows are visually greyed and ignore
+// taps so the user understands they're inactive.
+function NotificationsBody({
+  theme,
+  notificationsEnabled,
+  notifOverdue,
+  notifBirthdays,
+  hasPushToken,
+  onSaveNotificationPrefs,
+  onRegisterPushToken,
+  showToast,
+}) {
+  const [registering, setRegistering] = useState(false);
+
+  async function handleGlobalToggle(newValue) {
+    if (newValue) {
+      // Turning on. If we don't yet have a push token saved, run the
+      // permission/registration flow before saving the preference.
+      if (!hasPushToken) {
+        setRegistering(true);
+        const result = await (onRegisterPushToken
+          ? onRegisterPushToken()
+          : { status: 'error' });
+        setRegistering(false);
+        if (result.status !== 'ok') {
+          if (result.status === 'denied') {
+            Alert.alert(
+              'Notifications blocked',
+              'You denied permission. Open your device Settings to enable notifications for Veery.',
+              [
+                { text: 'OK', style: 'cancel' },
+                { text: 'Open Settings', onPress: () => Linking.openSettings() },
+              ],
+            );
+          } else if (result.status === 'unsupported') {
+            Alert.alert(
+              'Not supported on this device',
+              'Push notifications require a physical device. They will work once you install the app on iOS or Android.',
+            );
+          } else {
+            Alert.alert(
+              'Could not enable notifications',
+              'Something went wrong getting your device token. Try again in a minute.',
+            );
+          }
+          return;
+        }
+      }
+      await onSaveNotificationPrefs({ notifications_enabled: true });
+    } else {
+      await onSaveNotificationPrefs({ notifications_enabled: false });
+    }
+  }
+
+  function handleTypeToggle(key, newValue) {
+    if (!notificationsEnabled) return;
+    onSaveNotificationPrefs({ [key]: newValue });
+  }
+
+  return (
+    <View style={{ padding: 14, gap: 8 }}>
+      <Text style={{ fontSize: 11, color: theme.t5, lineHeight: 16, marginBottom: 4 }}>
+        Get gentle reminders so you don't forget the people you care about. We never share
+        your data with anyone.
+      </Text>
+
+      {/* Global toggle */}
+      <View
+        style={{
+          flexDirection: 'row',
+          alignItems: 'center',
+          padding: 12,
+          borderRadius: 12,
+          backgroundColor: theme.bg3,
+          borderWidth: 1,
+          borderColor: theme.brd,
+          gap: 12,
+        }}
+      >
+        <View style={{ flex: 1 }}>
+          <Text style={{ color: theme.t1, fontSize: 13, fontWeight: '600' }}>
+            Enable notifications
+          </Text>
+          <Text style={{ color: theme.t5, fontSize: 11, marginTop: 2, lineHeight: 15 }}>
+            {registering
+              ? 'Requesting permission...'
+              : notificationsEnabled
+                ? 'Push notifications are active'
+                : 'Master switch for all reminders'}
+          </Text>
+        </View>
+        {registering ? (
+          <ActivityIndicator color={theme.ac} size="small" />
+        ) : (
+          <Toggle
+            value={!!notificationsEnabled}
+            onValueChange={handleGlobalToggle}
+            color={theme.ac}
+          />
+        )}
+      </View>
+
+      {/* Section header for per-type toggles */}
+      <Text
+        style={{
+          fontSize: 10,
+          color: theme.t5,
+          fontWeight: '700',
+          letterSpacing: 0.5,
+          textTransform: 'uppercase',
+          marginTop: 8,
+          marginBottom: 2,
+          marginLeft: 4,
+        }}
+      >
+        What to notify me about
+      </Text>
+
+      <NotifTypeRow
+        theme={theme}
+        enabled={notificationsEnabled}
+        value={notifOverdue}
+        onValueChange={(v) => handleTypeToggle('notif_overdue', v)}
+        title="Overdue follow-ups"
+        subtitle="When a contact's follow-up date passes"
+      />
+
+      <NotifTypeRow
+        theme={theme}
+        enabled={notificationsEnabled}
+        value={notifBirthdays}
+        onValueChange={(v) => handleTypeToggle('notif_birthdays', v)}
+        title="Birthdays & anniversaries"
+        subtitle="On the day, in the morning"
+      />
+
+      {/* Helper text when the user denies permission at the OS level */}
+      {notificationsEnabled && !hasPushToken ? (
+        <View
+          style={{
+            marginTop: 4,
+            padding: 10,
+            backgroundColor: theme.warn + '12',
+            borderWidth: 1,
+            borderColor: theme.warn + '40',
+            borderRadius: 10,
+          }}
+        >
+          <Text style={{ fontSize: 11, color: theme.warn, lineHeight: 16 }}>
+            Heads up: we don't have a push token for this device. Notifications won't
+            actually deliver until you reinstall on a real device with permissions granted.
+          </Text>
+        </View>
+      ) : null}
+    </View>
+  );
+}
+
+function NotifTypeRow({ theme, enabled, value, onValueChange, title, subtitle }) {
+  // When the parent global toggle is off, fade the row and ignore taps.
+  // The toggle still reflects the stored preference, just isn't interactive.
+  const opacity = enabled ? 1 : 0.4;
+  return (
+    <View
+      style={{
+        flexDirection: 'row',
+        alignItems: 'center',
+        padding: 12,
+        borderRadius: 12,
+        backgroundColor: theme.bg3,
+        borderWidth: 1,
+        borderColor: theme.brd,
+        gap: 12,
+        opacity,
+      }}
+    >
+      <View style={{ flex: 1 }}>
+        <Text style={{ color: theme.t1, fontSize: 13, fontWeight: '500' }}>{title}</Text>
+        <Text style={{ color: theme.t5, fontSize: 11, marginTop: 2 }}>{subtitle}</Text>
+      </View>
+      <Toggle
+        value={!!value}
+        onValueChange={onValueChange}
+        color={theme.info}
+        disabled={!enabled}
+      />
+    </View>
+  );
+}
+
 function SectionLabel({ theme, text, danger }) {
   return (
     <Text
@@ -804,9 +1092,6 @@ function SectionLabel({ theme, text, danger }) {
   );
 }
 
-// ============================================================
-// Coming-soon stub row (greyed out, no chevron, no tap)
-// ============================================================
 function ComingSoonRow({ theme, icon, title, subtitle }) {
   return (
     <View
@@ -847,7 +1132,7 @@ function ComingSoonRow({ theme, icon, title, subtitle }) {
 }
 
 // ============================================================
-// Granola Integration (unchanged from prior version)
+// Granola Integration
 // ============================================================
 function GranolaIntegration({
   myCard,
@@ -856,6 +1141,7 @@ function GranolaIntegration({
   showToast,
   reviewQueue,
   onAddToReviewQueue,
+  onRemoveFromReviewQueue,
   onClearReviewQueue,
   onOpenReviewQueue,
   granolaAiUnlocked,
@@ -868,6 +1154,8 @@ function GranolaIntegration({
   const [syncing, setSyncing] = useState(false);
   const [lastSync, setLastSync] = useState(null);
   const [syncStatus, setSyncStatus] = useState('');
+  const [reprocessing, setReprocessing] = useState(false);
+  const [reprocessStatus, setReprocessStatus] = useState('');
 
   useEffect(() => {
     (async () => {
@@ -883,6 +1171,24 @@ function GranolaIntegration({
   }, []);
 
   const isConnected = !!storedKey;
+
+  const selfOnlyCount = React.useMemo(() => {
+    if (!Array.isArray(reviewQueue) || reviewQueue.length === 0) return 0;
+    const myEmails = new Set();
+    if (myCard?.email) myEmails.add(myCard.email.toLowerCase());
+    if (Array.isArray(myCard?.emails)) {
+      for (const e of myCard.emails) if (e?.value) myEmails.add(e.value.toLowerCase());
+    }
+    const myNames = new Set();
+    if (myCard?.name) myNames.add(myCard.name.toLowerCase().trim());
+    if (myCard?.displayName) myNames.add(myCard.displayName.toLowerCase().trim());
+
+    return reviewQueue.filter((q) => {
+      const email = (q?.attendee?.email || '').toLowerCase().trim();
+      const name = (q?.attendee?.name || '').toLowerCase().trim();
+      return (email && myEmails.has(email)) || (name && myNames.has(name));
+    }).length;
+  }, [reviewQueue, myCard]);
 
   async function testAndSave() {
     const key = apiKey.trim();
@@ -957,6 +1263,42 @@ function GranolaIntegration({
     }
 
     setSyncing(false);
+  }
+
+  async function findMissingAttendees() {
+    if (!storedKey) return;
+    if (!granolaAiUnlocked) return;
+    if (selfOnlyCount === 0) return;
+
+    confirmAction(
+      'Find missing attendees',
+      `This will use AI to re-read the transcripts of ${selfOnlyCount} meeting${selfOnlyCount === 1 ? '' : 's'} where only you were detected as an attendee. It will identify the other speakers and replace the self-attendee items with proper queue items.`,
+      async () => {
+        setReprocessing(true);
+        setReprocessStatus('Starting...');
+        try {
+          const result = await reprocessSelfOnlyItems({
+            apiKey: storedKey,
+            myCard,
+            contacts,
+            granolaAiUnlocked: true,
+            reviewQueue,
+            onProgress: (msg) => setReprocessStatus(msg),
+            onCommit,
+            addToReviewQueue: onAddToReviewQueue,
+            removeFromReviewQueue: onRemoveFromReviewQueue,
+          });
+          setReprocessStatus(result.summary || 'Done.');
+          showToast && showToast(result.summary, theme.ac);
+        } catch (e) {
+          console.error('reprocessSelfOnlyItems error:', e);
+          setReprocessStatus('Reprocess failed: ' + (e.message || 'Unknown error'));
+          Alert.alert('Reprocess failed', e.message || 'Unknown error');
+        }
+        setReprocessing(false);
+      },
+      'Find them',
+    );
   }
 
   function maskKey(k) {
@@ -1036,6 +1378,58 @@ function GranolaIntegration({
 
         {syncStatus ? (
           <Text style={{ color: theme.t4, fontSize: 11, lineHeight: 16 }}>{syncStatus}</Text>
+        ) : null}
+
+        {granolaAiUnlocked && selfOnlyCount > 0 ? (
+          <View
+            style={{
+              backgroundColor: theme.purp + '10',
+              borderRadius: 12,
+              padding: 12,
+              borderWidth: 1,
+              borderColor: theme.purp + '40',
+              gap: 8,
+            }}
+          >
+            <Text style={{ color: theme.t1, fontSize: 12, fontWeight: '600' }}>
+              Some meetings only show you as an attendee
+            </Text>
+            <Text style={{ color: theme.t4, fontSize: 11, lineHeight: 16 }}>
+              {selfOnlyCount} item{selfOnlyCount === 1 ? '' : 's'} in your review queue
+              {selfOnlyCount === 1 ? ' has' : ' have'} only you listed. This happens when
+              Granola records from another device. AI can re-read the transcripts to find
+              the other speakers.
+            </Text>
+            <TouchableOpacity
+              onPress={findMissingAttendees}
+              disabled={reprocessing}
+              style={{
+                paddingVertical: 10,
+                borderRadius: 10,
+                backgroundColor: theme.purp,
+                alignItems: 'center',
+                opacity: reprocessing ? 0.6 : 1,
+              }}
+            >
+              {reprocessing ? (
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                  <ActivityIndicator color="#fff" size="small" />
+                  <Text style={{ color: '#fff', fontSize: 12, fontWeight: '700' }}>
+                    Working...
+                  </Text>
+                </View>
+              ) : (
+                <Text style={{ color: '#fff', fontSize: 12, fontWeight: '700' }}>
+                  Find missing attendees
+                </Text>
+              )}
+            </TouchableOpacity>
+            {reprocessStatus ? (
+              <Text style={{ color: theme.t5, fontSize: 11, lineHeight: 15 }}>
+                {reprocessStatus}
+              </Text>
+            ) : null}
+          </View>
         ) : null}
 
         {Array.isArray(reviewQueue) && reviewQueue.length > 0 ? (
@@ -1137,9 +1531,6 @@ function GranolaIntegration({
   );
 }
 
-// ============================================================
-// Shared collapsible section
-// ============================================================
 function SettingsSection({ icon, title, subtitle, open, onPress, children }) {
   const { theme } = useTheme();
   return (
@@ -1197,9 +1588,6 @@ function DataRow({ icon, label, onPress }) {
   );
 }
 
-// ============================================================
-// Tags Manager (unchanged)
-// ============================================================
 function TagsManager({ customTags, hiddenTags, onSaveCustom, onSaveHidden }) {
   const { theme } = useTheme();
   const [openCat, setOpenCat] = useState(null);
@@ -1526,9 +1914,6 @@ function TagChip({ label, hidden, onPress, onDelete }) {
   );
 }
 
-// ============================================================
-// Interests Manager (unchanged, with confirmAction)
-// ============================================================
 function InterestsManager({ customInterests, hiddenInterests, onSaveCustom, onSaveHidden }) {
   const { theme } = useTheme();
   const [adding, setAdding] = useState(false);
@@ -1636,9 +2021,6 @@ function InterestsManager({ customInterests, hiddenInterests, onSaveCustom, onSa
   );
 }
 
-// ============================================================
-// Subscription card (unchanged, just lives under Account section now)
-// ============================================================
 function SubscriptionCard({
   theme,
   tier,
