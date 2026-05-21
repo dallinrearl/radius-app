@@ -304,6 +304,7 @@ export default function DetailScreen({
           consumeAiCall={consumeAiCall}
           aiRemaining={aiRemaining}
           effectiveTier={effectiveTier}
+          onUpdate={onUpdate}
         />
 
         {/* Contact Methods */}
@@ -972,30 +973,59 @@ function DetailBlock({ label, content }) {
 // ============================================================
 // AI panel: Meeting Prep / Background / Ask AI
 // ============================================================
-function AIPanel({ contact, consumeAiCall, aiRemaining, effectiveTier }) {
+function AIPanel({ contact, consumeAiCall, aiRemaining, effectiveTier, onUpdate }) {
   const { theme } = useTheme();
-  const [mode, setMode] = useState(null);
   const [result, setResult] = useState('');
   const [loading, setLoading] = useState(false);
   const [askOpen, setAskOpen] = useState(false);
+  const [bgExpanded, setBgExpanded] = useState(false);
+  const [bgLoading, setBgLoading] = useState(false);
+  const [bgError, setBgError] = useState('');
 
-  async function run(type) {
+  const savedBackground = contact.aiBackgroundSummary || '';
+
+  async function runPrep() {
     if (consumeAiCall) {
       const allowed = await consumeAiCall('ai_limit_reached');
       if (!allowed) return;
     }
-    setMode(type);
     setResult('');
     setLoading(true);
     try {
-      let r = '';
-      if (type === 'prep') r = await aiMeetingPrep(contact);
-      else if (type === 'background') r = await aiBackground(contact);
+      const r = await aiMeetingPrep(contact);
       setResult(r);
     } catch (_) {
       setResult('Failed to generate. Try again.');
     }
     setLoading(false);
+  }
+
+  async function generateBackground() {
+    if (consumeAiCall) {
+      const allowed = await consumeAiCall('ai_limit_reached');
+      if (!allowed) return;
+    }
+    setBgLoading(true);
+    setBgError('');
+    try {
+      const r = await aiBackground(contact);
+      if (onUpdate) {
+        onUpdate({ ...contact, aiBackgroundSummary: r, aiBackgroundUpdatedAt: Date.now() });
+      }
+      setBgExpanded(true);
+    } catch (_) {
+      setBgError('Failed to generate. Try again.');
+    }
+    setBgLoading(false);
+  }
+
+  function onBackgroundButtonPress() {
+    if (bgLoading) return;
+    if (savedBackground) {
+      setBgExpanded((e) => !e);
+    } else {
+      generateBackground();
+    }
   }
 
   const Btn = ({ label, onPress, color, bgColor, brdColor }) => (
@@ -1020,14 +1050,14 @@ function AIPanel({ contact, consumeAiCall, aiRemaining, effectiveTier }) {
       <View style={{ flexDirection: 'row', gap: 6 }}>
         <Btn
           label="Meeting Prep"
-          onPress={() => run('prep')}
+          onPress={runPrep}
           color={theme.ac}
           bgColor={theme.bgAc}
           brdColor={theme.brdAc}
         />
         <Btn
           label="Background"
-          onPress={() => run('background')}
+          onPress={onBackgroundButtonPress}
           color={theme.ac}
           bgColor={theme.bgAc}
           brdColor={theme.brdAc}
@@ -1067,6 +1097,76 @@ function AIPanel({ contact, consumeAiCall, aiRemaining, effectiveTier }) {
           )}
         </View>
       )}
+
+      {(savedBackground || bgLoading || bgError) ? (
+        <View
+          style={{
+            backgroundColor: theme.bg2,
+            borderRadius: 14,
+            borderWidth: 1,
+            borderColor: theme.brd,
+            overflow: 'hidden',
+          }}
+        >
+          <TouchableOpacity
+            onPress={() => savedBackground && !bgLoading && setBgExpanded((e) => !e)}
+            activeOpacity={savedBackground && !bgLoading ? 0.7 : 1}
+            style={{
+              flexDirection: 'row',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              padding: 14,
+            }}
+          >
+            <Text style={{ fontSize: 13, color: theme.t1, fontWeight: '600' }}>
+              Background
+            </Text>
+            {bgLoading ? (
+              <ActivityIndicator color={theme.ac} size="small" />
+            ) : savedBackground ? (
+              <View style={{ transform: [{ rotate: bgExpanded ? '180deg' : '0deg' }] }}>
+                <ChevronDown size={14} color={theme.t5} />
+              </View>
+            ) : null}
+          </TouchableOpacity>
+          {bgLoading && !savedBackground ? (
+            <View style={{ paddingHorizontal: 14, paddingBottom: 14 }}>
+              <Text style={{ color: theme.ac, fontSize: 12, fontWeight: '600' }}>
+                Generating...
+              </Text>
+            </View>
+          ) : null}
+          {!bgLoading && bgError && !savedBackground ? (
+            <View style={{ paddingHorizontal: 14, paddingBottom: 14 }}>
+              <Text style={{ color: theme.warn, fontSize: 12 }}>{bgError}</Text>
+            </View>
+          ) : null}
+          {savedBackground && bgExpanded && !bgLoading ? (
+            <View style={{ paddingHorizontal: 14, paddingBottom: 14, gap: 10 }}>
+              <MarkdownText text={savedBackground} theme={theme} />
+              {bgError ? (
+                <Text style={{ color: theme.warn, fontSize: 11 }}>{bgError}</Text>
+              ) : null}
+              <TouchableOpacity
+                onPress={generateBackground}
+                style={{
+                  alignSelf: 'flex-start',
+                  paddingHorizontal: 12,
+                  paddingVertical: 8,
+                  borderRadius: 10,
+                  borderWidth: 1,
+                  borderColor: theme.brdAc,
+                  backgroundColor: theme.bgAc,
+                }}
+              >
+                <Text style={{ color: theme.ac, fontSize: 11, fontWeight: '600' }}>
+                  Update with AI
+                </Text>
+              </TouchableOpacity>
+            </View>
+          ) : null}
+        </View>
+      ) : null}
 
       <AskAIModal
         visible={askOpen}
