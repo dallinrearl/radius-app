@@ -655,11 +655,6 @@ export async function aiTemplate(contact, type) {
     `Write the email. Specific over generic. Short over long.`;
   return callClaude({ system, prompt, max_tokens: 500 });
 }
-// ============================================================
-// PASTE THIS FUNCTION INTO src/utils/ai.js
-// Add it right after aiTemplate (around line 657 in current file),
-// before the `// ---------- aiExtractMeetingNote ----------` comment.
-// ============================================================
 
 // ---------- aiAnswerQuestion ----------
 //
@@ -754,6 +749,7 @@ ${summary}${transcriptBlock}`;
 
   return callClaude({ system, prompt, max_tokens: 800 });
 }
+
 // ---------- aiExtractMeetingNote ----------
 //
 // summaryLength controls the format/length of the output.
