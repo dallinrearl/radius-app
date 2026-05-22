@@ -47,6 +47,10 @@ function fromDb(row) {
     mailingLists: Array.isArray(extra.mailingLists) ? extra.mailingLists : [],
     isSample: extra.isSample || false,
     sampleAddedAt: extra.sampleAddedAt || null,
+    aiBackgroundSummary: extra.aiBackgroundSummary || '',
+    aiBackgroundUpdatedAt: extra.aiBackgroundUpdatedAt || null,
+    aiMeetingPrep: extra.aiMeetingPrep || '',
+    aiMeetingPrepUpdatedAt: extra.aiMeetingPrepUpdatedAt || null,
   };
 }
 
@@ -149,6 +153,10 @@ function toDb(contact, userId) {
       mailingLists: Array.isArray(contact.mailingLists) ? contact.mailingLists : [],
       isSample: !!contact.isSample,
       sampleAddedAt: contact.sampleAddedAt || null,
+      aiBackgroundSummary: contact.aiBackgroundSummary || '',
+      aiBackgroundUpdatedAt: contact.aiBackgroundUpdatedAt || null,
+      aiMeetingPrep: contact.aiMeetingPrep || '',
+      aiMeetingPrepUpdatedAt: contact.aiMeetingPrepUpdatedAt || null,
     },
   };
   // Always include id. If the contact has a real UUID already, use it (so

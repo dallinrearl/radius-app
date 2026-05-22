@@ -25,7 +25,7 @@ import {
 import * as Contacts from 'expo-contacts';
 import * as ImagePicker from 'expo-image-picker';
 import { Audio } from 'expo-av';
-import { BarCodeScanner } from 'expo-barcode-scanner';
+import { CameraView, Camera } from 'expo-camera';
 import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system';
 import QRCode from 'react-native-qrcode-svg';
@@ -963,7 +963,7 @@ function ReceiveCard({ onComplete, onBack }) {
 
   useEffect(() => {
     (async () => {
-      const { status } = await BarCodeScanner.requestPermissionsAsync();
+      const { status } = await Camera.requestCameraPermissionsAsync();
       setHasPerm(status === 'granted');
     })();
   }, []);
@@ -1122,8 +1122,9 @@ function ReceiveCard({ onComplete, onBack }) {
             backgroundColor: '#000',
           }}
         >
-          <BarCodeScanner
-            onBarCodeScanned={scanned ? undefined : onScan}
+          <CameraView
+            onBarcodeScanned={scanned ? undefined : onScan}
+            barcodeScannerSettings={{ barcodeTypes: ['qr'] }}
             style={{ flex: 1 }}
           />
         </View>
