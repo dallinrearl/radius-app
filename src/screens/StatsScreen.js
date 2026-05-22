@@ -1,12 +1,10 @@
 import React, { useMemo, useState } from 'react';
-import { View, Text, ScrollView, Dimensions, TouchableOpacity } from 'react-native';
-import Svg, { Path, Circle, Line, Rect, G, Text as SvgText, Defs, RadialGradient, Stop } from 'react-native-svg';
+import { View, Text, ScrollView, TouchableOpacity } from 'react-native';
+import Svg, { Path, Circle, Line, G, Text as SvgText, Defs, RadialGradient, Stop } from 'react-native-svg';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useTheme } from '../styles/theme';
 import { nextDate, daysUntil } from '../utils/helpers';
 import { TAG_COLORS, CUSTOM_TAG_COLORS } from '../constants';
-
-const { width: SCREEN_W } = Dimensions.get('window');
 
 // Distinct colors used for category slices that don't have a TAG_COLORS
 // entry (companies, cities, tenure buckets). Health filter has its own
@@ -328,16 +326,19 @@ export default function StatsScreen({ activeContacts }) {
 
   return (
     <View style={{ flex: 1, backgroundColor: theme.bg }}>
-      <ScrollView
-        contentContainerStyle={{
-          padding: 20,
-          paddingTop: insets.top + 12,
-          paddingBottom: 120,
+      <View
+        style={{
+          paddingTop: insets.top + 20,
+          paddingBottom: 20,
+          paddingHorizontal: 20,
+          backgroundColor: theme.navBg,
+          borderBottomWidth: 1,
+          borderBottomColor: theme.brd,
         }}
       >
         <Text
           style={{
-            fontSize: 22,
+            fontSize: 26,
             color: theme.t1,
             fontWeight: '600',
             marginBottom: 4,
@@ -346,9 +347,16 @@ export default function StatsScreen({ activeContacts }) {
         >
           Your Activity
         </Text>
-        <Text style={{ fontSize: 12, color: theme.t5, marginBottom: 20 }}>
+        <Text style={{ fontSize: 12, color: theme.t5 }}>
           Insights into your relationship building
         </Text>
+      </View>
+      <ScrollView
+        contentContainerStyle={{
+          padding: 20,
+          paddingBottom: 120,
+        }}
+      >
 
         {/* Top stats grid */}
         <View
@@ -607,11 +615,14 @@ function LegendRow({ label, count, color }) {
 }
 
 function LineChart({ data, theme }) {
-  const W = SCREEN_W - 80;
+  const [W, setW] = useState(0);
   const H = 140;
+  // Inset so the leftmost/rightmost dots and labels don't sit on the edge.
+  const PAD_X = 8;
   const max = Math.max(...data.map((d) => d.count), 1);
+  const plotW = Math.max(W - PAD_X * 2, 0);
   const points = data.map((d, i) => {
-    const x = (i / (data.length - 1)) * W;
+    const x = PAD_X + (i / (data.length - 1)) * plotW;
     const y = H - (d.count / max) * (H - 20) - 10;
     return { x, y, count: d.count, label: d.label };
   });
@@ -619,38 +630,43 @@ function LineChart({ data, theme }) {
     .map((p, i) => (i === 0 ? 'M' + p.x + ',' + p.y : 'L' + p.x + ',' + p.y))
     .join(' ');
   return (
-    <View>
-      <Svg width={W} height={H + 24}>
-        {[0.25, 0.5, 0.75].map((p, i) => (
-          <Line
-            key={i}
-            x1="0"
-            y1={H * p}
-            x2={W}
-            y2={H * p}
-            stroke={theme.brd}
-            strokeWidth="0.5"
-          />
-        ))}
-        <Path d={path} stroke={theme.ac} strokeWidth="2" fill="none" />
-        {points.map((p, i) => (
-          <Circle key={i} cx={p.x} cy={p.y} r="3" fill={theme.ac} />
-        ))}
-        {points.map((p, i) =>
-          i % 2 === 0 ? (
-            <SvgText
-              key={'l' + i}
-              x={p.x}
-              y={H + 14}
-              fontSize="9"
-              fill={theme.t5}
-              textAnchor="middle"
-            >
-              {p.label}
-            </SvgText>
-          ) : null,
-        )}
-      </Svg>
+    <View
+      style={{ width: '100%' }}
+      onLayout={(e) => setW(e.nativeEvent.layout.width)}
+    >
+      {W > 0 && (
+        <Svg width={W} height={H + 24}>
+          {[0.25, 0.5, 0.75].map((p, i) => (
+            <Line
+              key={i}
+              x1="0"
+              y1={H * p}
+              x2={W}
+              y2={H * p}
+              stroke={theme.brd}
+              strokeWidth="0.5"
+            />
+          ))}
+          <Path d={path} stroke={theme.ac} strokeWidth="2" fill="none" />
+          {points.map((p, i) => (
+            <Circle key={i} cx={p.x} cy={p.y} r="3" fill={theme.ac} />
+          ))}
+          {points.map((p, i) =>
+            i % 2 === 0 ? (
+              <SvgText
+                key={'l' + i}
+                x={p.x}
+                y={H + 14}
+                fontSize="9"
+                fill={theme.t5}
+                textAnchor="middle"
+              >
+                {p.label}
+              </SvgText>
+            ) : null,
+          )}
+        </Svg>
+      )}
     </View>
   );
 }
