@@ -141,8 +141,8 @@ export default function NextUpScreen({
       {/* Header */}
       <View
         style={{
-          paddingTop: insets.top + 12,
-          paddingBottom: 14,
+          paddingTop: insets.top + 20,
+          paddingBottom: 20,
           paddingHorizontal: 20,
           backgroundColor: theme.navBg,
           borderBottomWidth: 1,
@@ -159,9 +159,9 @@ export default function NextUpScreen({
           <View>
             <Text
               style={{
-                fontSize: 18,
+                fontSize: 26,
                 color: theme.t1,
-                fontWeight: '700',
+                fontWeight: '600',
                 fontFamily: theme.fontDisplay,
               }}
             >
@@ -169,10 +169,9 @@ export default function NextUpScreen({
             </Text>
             <Text
               style={{
-                fontSize: 11,
-                color: theme.gold,
+                fontSize: 12,
+                color: theme.t5,
                 marginTop: 2,
-                letterSpacing: 0.3,
               }}
             >
               {upcoming.length} upcoming

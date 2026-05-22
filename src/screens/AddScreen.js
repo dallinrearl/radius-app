@@ -57,7 +57,7 @@ export default function AddScreen({ mode, setMode, onComplete, contacts, myCard,
         <BackButton onPress={onBack} />
         <Text
           style={{
-            fontSize: 22,
+            fontSize: 26,
             color: theme.t1,
             fontWeight: '600',
             marginBottom: 6,
@@ -384,7 +384,7 @@ function VoiceCapture({ onComplete, onBack }) {
       <BackButton onPress={onBack} />
       <Text
         style={{
-          fontSize: 22,
+          fontSize: 26,
           color: theme.t1,
           fontWeight: '600',
           marginBottom: 6,
@@ -669,7 +669,7 @@ function CardScan({ onComplete, onBack }) {
       <BackButton onPress={onBack} />
       <Text
         style={{
-          fontSize: 22,
+          fontSize: 26,
           color: theme.t1,
           fontWeight: '600',
           marginBottom: 6,
@@ -859,7 +859,7 @@ function ImportContacts({ onComplete, contacts, onCommit, showToast, onBack }) {
         <BackButton onPress={onBack} />
         <Text
           style={{
-            fontSize: 22,
+            fontSize: 26,
             color: theme.t1,
             fontWeight: '600',
             marginBottom: 6,
@@ -1088,7 +1088,7 @@ function ReceiveCard({ onComplete, onBack }) {
         <BackButton onPress={onBack} />
         <Text
           style={{
-            fontSize: 22,
+            fontSize: 26,
             color: theme.t1,
             fontWeight: '600',
             marginBottom: 6,
@@ -1169,7 +1169,7 @@ function ShareCard({ myCard, onBack }) {
       </View>
       <Text
         style={{
-          fontSize: 22,
+          fontSize: 26,
           color: theme.t1,
           fontWeight: '600',
           marginBottom: 6,

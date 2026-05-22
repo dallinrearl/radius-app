@@ -240,24 +240,37 @@ export default function SettingsScreen({
 
   return (
     <View style={{ flex: 1, backgroundColor: theme.bg }}>
-      <ScrollView
-        contentContainerStyle={{
-          padding: 20,
-          paddingTop: insets.top + 12,
-          paddingBottom: 120,
+      <View
+        style={{
+          paddingTop: insets.top + 20,
+          paddingBottom: 20,
+          paddingHorizontal: 20,
+          backgroundColor: theme.navBg,
+          borderBottomWidth: 1,
+          borderBottomColor: theme.brd,
         }}
       >
         <Text
           style={{
-            fontSize: 22,
+            fontSize: 26,
             color: theme.t1,
             fontWeight: '600',
-            marginBottom: 20,
+            marginBottom: 4,
             fontFamily: theme.fontDisplay,
           }}
         >
           Settings
         </Text>
+        <Text style={{ fontSize: 12, color: theme.t5 }}>
+          Customize your experience here
+        </Text>
+      </View>
+      <ScrollView
+        contentContainerStyle={{
+          padding: 20,
+          paddingBottom: 120,
+        }}
+      >
 
         <SectionLabel theme={theme} text="Account" />
 

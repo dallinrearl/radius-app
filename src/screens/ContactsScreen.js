@@ -132,8 +132,8 @@ export default function ContactsScreen({
     <View style={{ flex: 1, backgroundColor: theme.bg }}>
       <View
         style={{
-          paddingTop: insets.top + 12,
-          paddingBottom: 14,
+          paddingTop: insets.top + 20,
+          paddingBottom: 20,
           paddingHorizontal: 20,
           flexDirection: 'row',
           justifyContent: 'space-between',
@@ -146,15 +146,15 @@ export default function ContactsScreen({
         <View>
           <Text
             style={{
-              fontSize: 18,
+              fontSize: 26,
               color: theme.t1,
-              fontWeight: '700',
+              fontWeight: '600',
               fontFamily: theme.fontDisplay,
             }}
           >
             Contacts
           </Text>
-          <Text style={{ fontSize: 11, color: theme.gold, marginTop: 2, letterSpacing: 0.3 }}>
+          <Text style={{ fontSize: 12, color: theme.t5, marginTop: 2 }}>
             {contacts.length} contact{contacts.length !== 1 ? 's' : ''}
           </Text>
         </View>
