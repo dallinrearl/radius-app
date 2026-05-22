@@ -13,6 +13,7 @@ import {
   KeyboardAvoidingView,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { Swipeable } from 'react-native-gesture-handler';
 import { useTheme } from '../styles/theme';
 import { Avatar, StrengthDot, TagPill, BackButton } from '../components/Common';
 import {
@@ -160,7 +161,7 @@ export default function DetailScreen({
     showToast('Logged contact with ' + displayName);
   }
 
-  const QBtn = ({ label, onPress, gold }) => (
+  const QBtn = ({ label, onPress }) => (
     <TouchableOpacity
       onPress={onPress}
       activeOpacity={0.7}
@@ -169,11 +170,11 @@ export default function DetailScreen({
         paddingVertical: 8,
         borderRadius: 12,
         borderWidth: 1,
-        borderColor: gold ? theme.gold : theme.brdAc,
-        backgroundColor: gold ? theme.bgGold : theme.bgAc,
+        borderColor: theme.brdAc,
+        backgroundColor: theme.bgAc,
       }}
     >
-      <Text style={{ color: gold ? theme.gold : theme.ac, fontSize: 12, fontWeight: '600' }}>{label}</Text>
+      <Text style={{ color: theme.ac, fontSize: 12, fontWeight: '600' }}>{label}</Text>
     </TouchableOpacity>
   );
 
@@ -274,7 +275,7 @@ export default function DetailScreen({
 
         {/* Quick Actions */}
         <View style={{ flexDirection: 'row', gap: 6, marginBottom: 18, flexWrap: 'wrap' }}>
-          <QBtn label="Log Today" onPress={logToday} gold />
+          <QBtn label="Log Today" onPress={logToday} />
           {primaryPhone ? (
             <QBtn label="Call" onPress={() => Linking.openURL('tel:' + primaryPhone)} />
           ) : null}
@@ -975,29 +976,43 @@ function DetailBlock({ label, content }) {
 // ============================================================
 function AIPanel({ contact, consumeAiCall, aiRemaining, effectiveTier, onUpdate }) {
   const { theme } = useTheme();
-  const [result, setResult] = useState('');
-  const [loading, setLoading] = useState(false);
   const [askOpen, setAskOpen] = useState(false);
   const [bgExpanded, setBgExpanded] = useState(false);
   const [bgLoading, setBgLoading] = useState(false);
   const [bgError, setBgError] = useState('');
+  const [prepExpanded, setPrepExpanded] = useState(false);
+  const [prepLoading, setPrepLoading] = useState(false);
+  const [prepError, setPrepError] = useState('');
 
   const savedBackground = contact.aiBackgroundSummary || '';
+  const savedPrep = contact.aiMeetingPrep || '';
 
-  async function runPrep() {
+  async function generatePrep() {
     if (consumeAiCall) {
       const allowed = await consumeAiCall('ai_limit_reached');
       if (!allowed) return;
     }
-    setResult('');
-    setLoading(true);
+    setPrepLoading(true);
+    setPrepError('');
     try {
       const r = await aiMeetingPrep(contact);
-      setResult(r);
+      if (onUpdate) {
+        onUpdate({ ...contact, aiMeetingPrep: r, aiMeetingPrepUpdatedAt: Date.now() });
+      }
+      setPrepExpanded(true);
     } catch (_) {
-      setResult('Failed to generate. Try again.');
+      setPrepError('Failed to generate. Try again.');
     }
-    setLoading(false);
+    setPrepLoading(false);
+  }
+
+  function onPrepButtonPress() {
+    if (prepLoading) return;
+    if (savedPrep) {
+      setPrepExpanded((e) => !e);
+    } else {
+      generatePrep();
+    }
   }
 
   async function generateBackground() {
@@ -1028,6 +1043,39 @@ function AIPanel({ contact, consumeAiCall, aiRemaining, effectiveTier, onUpdate 
     }
   }
 
+  function deleteBackground() {
+    if (onUpdate) {
+      onUpdate({ ...contact, aiBackgroundSummary: '', aiBackgroundUpdatedAt: null });
+    }
+    setBgExpanded(false);
+    setBgError('');
+  }
+
+  function deletePrep() {
+    if (onUpdate) {
+      onUpdate({ ...contact, aiMeetingPrep: '', aiMeetingPrepUpdatedAt: null });
+    }
+    setPrepExpanded(false);
+    setPrepError('');
+  }
+
+  const renderDeleteAction = (onDelete) => () => (
+    <TouchableOpacity
+      onPress={onDelete}
+      activeOpacity={0.85}
+      style={{
+        width: 80,
+        backgroundColor: theme.red,
+        alignItems: 'center',
+        justifyContent: 'center',
+        borderTopRightRadius: 14,
+        borderBottomRightRadius: 14,
+      }}
+    >
+      <Text style={{ color: '#fff', fontSize: 12, fontWeight: '700' }}>Delete</Text>
+    </TouchableOpacity>
+  );
+
   const Btn = ({ label, onPress, color, bgColor, brdColor }) => (
     <TouchableOpacity
       onPress={onPress}
@@ -1050,7 +1098,7 @@ function AIPanel({ contact, consumeAiCall, aiRemaining, effectiveTier, onUpdate 
       <View style={{ flexDirection: 'row', gap: 6 }}>
         <Btn
           label="Meeting Prep"
-          onPress={runPrep}
+          onPress={onPrepButtonPress}
           color={theme.ac}
           bgColor={theme.bgAc}
           brdColor={theme.brdAc}
@@ -1075,30 +1123,86 @@ function AIPanel({ contact, consumeAiCall, aiRemaining, effectiveTier, onUpdate 
           {aiRemaining} of 5 AI calls remaining this month
         </Text>
       ) : null}
-      {(loading || result) && (
+      {(savedPrep || prepLoading || prepError) ? (
+        <Swipeable
+          renderRightActions={savedPrep ? renderDeleteAction(deletePrep) : undefined}
+          overshootRight={false}
+        >
         <View
           style={{
             backgroundColor: theme.bg2,
             borderRadius: 14,
-            padding: 14,
             borderWidth: 1,
             borderColor: theme.brd,
+            overflow: 'hidden',
           }}
         >
-          {loading ? (
-            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+          <TouchableOpacity
+            onPress={() => savedPrep && !prepLoading && setPrepExpanded((e) => !e)}
+            activeOpacity={savedPrep && !prepLoading ? 0.7 : 1}
+            style={{
+              flexDirection: 'row',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              padding: 14,
+            }}
+          >
+            <Text style={{ fontSize: 13, color: theme.t1, fontWeight: '600' }}>
+              Meeting Prep
+            </Text>
+            {prepLoading ? (
               <ActivityIndicator color={theme.ac} size="small" />
+            ) : savedPrep ? (
+              <View style={{ transform: [{ rotate: prepExpanded ? '180deg' : '0deg' }] }}>
+                <ChevronDown size={14} color={theme.t5} />
+              </View>
+            ) : null}
+          </TouchableOpacity>
+          {prepLoading && !savedPrep ? (
+            <View style={{ paddingHorizontal: 14, paddingBottom: 14 }}>
               <Text style={{ color: theme.ac, fontSize: 12, fontWeight: '600' }}>
                 Generating...
               </Text>
             </View>
-          ) : (
-            <MarkdownText text={result} theme={theme} />
-          )}
+          ) : null}
+          {!prepLoading && prepError && !savedPrep ? (
+            <View style={{ paddingHorizontal: 14, paddingBottom: 14 }}>
+              <Text style={{ color: theme.warn, fontSize: 12 }}>{prepError}</Text>
+            </View>
+          ) : null}
+          {savedPrep && prepExpanded && !prepLoading ? (
+            <View style={{ paddingHorizontal: 14, paddingBottom: 14, gap: 10 }}>
+              <MarkdownText text={savedPrep} theme={theme} />
+              {prepError ? (
+                <Text style={{ color: theme.warn, fontSize: 11 }}>{prepError}</Text>
+              ) : null}
+              <TouchableOpacity
+                onPress={generatePrep}
+                style={{
+                  alignSelf: 'flex-start',
+                  paddingHorizontal: 12,
+                  paddingVertical: 8,
+                  borderRadius: 10,
+                  borderWidth: 1,
+                  borderColor: theme.brdAc,
+                  backgroundColor: theme.bgAc,
+                }}
+              >
+                <Text style={{ color: theme.ac, fontSize: 11, fontWeight: '600' }}>
+                  Update with AI
+                </Text>
+              </TouchableOpacity>
+            </View>
+          ) : null}
         </View>
-      )}
+        </Swipeable>
+      ) : null}
 
       {(savedBackground || bgLoading || bgError) ? (
+        <Swipeable
+          renderRightActions={savedBackground ? renderDeleteAction(deleteBackground) : undefined}
+          overshootRight={false}
+        >
         <View
           style={{
             backgroundColor: theme.bg2,
@@ -1166,6 +1270,7 @@ function AIPanel({ contact, consumeAiCall, aiRemaining, effectiveTier, onUpdate 
             </View>
           ) : null}
         </View>
+        </Swipeable>
       ) : null}
 
       <AskAIModal
@@ -1843,7 +1948,7 @@ function FollowUpSchedule({ contact, onUpdate, theme }) {
           {customFollowUp ? (
             <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
               <Text style={{ fontSize: 12, color: theme.t5 }}>One-off follow-up</Text>
-              <Text style={{ fontSize: 12, color: theme.gold, fontWeight: '600' }}>
+              <Text style={{ fontSize: 12, color: theme.warn, fontWeight: '600' }}>
                 {customFollowUp}
               </Text>
             </View>
