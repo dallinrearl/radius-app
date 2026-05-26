@@ -33,16 +33,18 @@ import { aiExtractFromVoice, aiExtractFromImage } from '../utils/ai';
 import { makeVcf, isoToday } from '../utils/helpers';
 import { EMPTY_CONTACT, splitLegacyName, getDisplayName } from '../constants';
 
-export default function AddScreen({ mode, setMode, onComplete, contacts, myCard, onBack, onCommit, showToast, reviewQueue }) {
+export default function AddScreen({ mode, setMode, onComplete, contacts, myCard, onBack, onCommit, showToast, reviewQueue, directEntry }) {
   const { theme } = useTheme();
   const insets = useSafeAreaInsets();
 
-  if (mode === 'voice') return <VoiceCapture onComplete={onComplete} onBack={() => setMode(null)} />;
-  if (mode === 'card') return <CardScan onComplete={onComplete} onBack={() => setMode(null)} />;
+  const subBack = directEntry ? onBack : () => setMode(null);
+
+  if (mode === 'voice') return <VoiceCapture onComplete={onComplete} onBack={subBack} />;
+  if (mode === 'card') return <CardScan onComplete={onComplete} onBack={subBack} />;
   if (mode === 'import')
-    return <ImportContacts onComplete={onComplete} contacts={contacts} onCommit={onCommit} showToast={showToast} onBack={() => setMode(null)} />;
-  if (mode === 'receive') return <ReceiveCard onComplete={onComplete} onBack={() => setMode(null)} />;
-  if (mode === 'share') return <ShareCard myCard={myCard} onBack={() => setMode(null)} />;
+    return <ImportContacts onComplete={onComplete} contacts={contacts} onCommit={onCommit} showToast={showToast} onBack={subBack} />;
+  if (mode === 'receive') return <ReceiveCard onComplete={onComplete} onBack={subBack} />;
+  if (mode === 'share') return <ShareCard myCard={myCard} onBack={subBack} />;
 
   // Landing grid
   return (
