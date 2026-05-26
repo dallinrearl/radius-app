@@ -1,7 +1,7 @@
 {
   "expo": {
     "name": "Veery",
-    "slug": "veery-app",
+    "slug": "radius-app",
     "version": "1.0.0",
     "scheme": "veery",
     "orientation": "portrait",
@@ -16,7 +16,9 @@
         "NSCameraUsageDescription": "Veery uses the camera to scan business cards and QR codes.",
         "NSMicrophoneUsageDescription": "Veery uses the microphone to record voice notes for new contacts.",
         "NSContactsUsageDescription": "Veery can import contacts from your address book.",
-        "NSPhotoLibraryUsageDescription": "Veery needs photo access to scan business cards from your library."
+        "NSPhotoLibraryUsageDescription": "Veery needs photo access to scan business cards from your library.",
+        "NSFaceIDUsageDescription": "Veery uses Face ID to unlock the app instead of typing your PIN.",
+        "ITSAppUsesNonExemptEncryption": false
       }
     },
     "android": {
@@ -25,7 +27,8 @@
         "android.permission.CAMERA",
         "android.permission.RECORD_AUDIO",
         "android.permission.READ_CONTACTS",
-        "android.permission.WRITE_CONTACTS"
+        "android.permission.WRITE_CONTACTS",
+        "android.permission.MODIFY_AUDIO_SETTINGS"
       ]
     },
     "web": {

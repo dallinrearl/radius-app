@@ -65,6 +65,7 @@ export function useAppStore() {
   const [customInterests, setCustomInterests] = useState([]);
   const [hiddenInterests, setHiddenInterests] = useState([]);
   const [pin, setPin] = useState(null);
+  const [faceIdEnabled, setFaceIdEnabled] = useState(false);
   const [displayName, setDisplayName] = useState('');
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
@@ -188,6 +189,10 @@ export function useAppStore() {
       try {
         const r = await storage.get('crm-pin');
         if (r?.value) setPin(r.value);
+      } catch (_) {}
+      try {
+        const r = await storage.get('crm-face-id-enabled');
+        if (r?.value === '1') setFaceIdEnabled(true);
       } catch (_) {}
       try {
         const r = await storage.get('crm-displayname');
@@ -599,8 +604,19 @@ export function useAppStore() {
   };
   const removePin = async () => {
     setPin(null);
+    setFaceIdEnabled(false);
     try {
       await storage.delete('crm-pin');
+    } catch (_) {}
+    try {
+      await storage.delete('crm-face-id-enabled');
+    } catch (_) {}
+  };
+  const saveFaceIdEnabled = async (enabled) => {
+    setFaceIdEnabled(!!enabled);
+    try {
+      if (enabled) await storage.set('crm-face-id-enabled', '1');
+      else await storage.delete('crm-face-id-enabled');
     } catch (_) {}
   };
   const saveDisplayName = async (n) => {
@@ -724,6 +740,7 @@ export function useAppStore() {
     allInterests,
     visibleInterests,
     pin,
+    faceIdEnabled,
     displayName,
     username,
     password,
@@ -770,6 +787,7 @@ export function useAppStore() {
     addCustomInterest,
     savePin,
     removePin,
+    saveFaceIdEnabled,
     saveDisplayName,
     saveUsername,
     savePassword,

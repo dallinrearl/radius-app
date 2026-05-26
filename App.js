@@ -777,7 +777,13 @@ function AppInner() {
     );
   }
   if (locked) {
-    return <LockScreen pin={store.pin} onUnlock={() => setLocked(false)} />;
+    return (
+      <LockScreen
+        pin={store.pin}
+        faceIdEnabled={store.faceIdEnabled}
+        onUnlock={() => setLocked(false)}
+      />
+    );
   }
 
   if (extractingForAttendee) {
@@ -908,6 +914,8 @@ function AppInner() {
           pin={store.pin}
           onSavePin={store.savePin}
           onRemovePin={store.removePin}
+          faceIdEnabled={store.faceIdEnabled}
+          onSaveFaceIdEnabled={store.saveFaceIdEnabled}
           displayName={store.displayName}
           onSaveDisplayName={store.saveDisplayName}
           username={store.username}

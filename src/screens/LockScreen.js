@@ -1,14 +1,81 @@
-import React, { useState } from 'react';
-import { View, Text, TouchableOpacity } from 'react-native';
+import React, { useEffect, useRef, useState } from 'react';
+import { View, Text, TouchableOpacity, AppState } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import * as LocalAuthentication from 'expo-local-authentication';
 import { useTheme } from '../styles/theme';
 import { LockIcon } from '../components/Icons';
 
-export default function LockScreen({ pin, onUnlock }) {
+export default function LockScreen({ pin, faceIdEnabled, onUnlock }) {
   const { theme } = useTheme();
   const insets = useSafeAreaInsets();
   const [entered, setEntered] = useState('');
   const [wrong, setWrong] = useState(false);
+  const [biometricSupported, setBiometricSupported] = useState(false);
+  const [biometricAttempting, setBiometricAttempting] = useState(false);
+  // Guard so we only auto-prompt once per mount. Manual taps on the button
+  // re-trigger via tryBiometric() and don't touch this ref.
+  const autoPromptedRef = useRef(false);
+
+  // Detect whether the device actually supports biometrics + is enrolled.
+  // hasHardwareAsync covers "no Face/Touch ID sensor" (e.g. older iPad).
+  // isEnrolledAsync covers "sensor exists but no face/finger registered."
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const hasHw = await LocalAuthentication.hasHardwareAsync();
+        const enrolled = await LocalAuthentication.isEnrolledAsync();
+        if (!cancelled) setBiometricSupported(hasHw && enrolled);
+      } catch (_) {
+        if (!cancelled) setBiometricSupported(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  async function tryBiometric() {
+    if (biometricAttempting) return;
+    setBiometricAttempting(true);
+    try {
+      const result = await LocalAuthentication.authenticateAsync({
+        promptMessage: 'Unlock Veery',
+        cancelLabel: 'Use PIN',
+        // Don't auto-fallback to device passcode — we have our own PIN.
+        disableDeviceFallback: true,
+      });
+      if (result.success) {
+        onUnlock();
+      }
+    } catch (_) {
+      // Any error -> just fall back to PIN entry.
+    } finally {
+      setBiometricAttempting(false);
+    }
+  }
+
+  // Auto-prompt Face ID once, when biometrics are supported + the user has
+  // opted in. If they cancel or it fails, they can tap the button to retry
+  // or just enter the PIN.
+  useEffect(() => {
+    if (!faceIdEnabled || !biometricSupported || autoPromptedRef.current) return;
+    autoPromptedRef.current = true;
+    tryBiometric();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [faceIdEnabled, biometricSupported]);
+
+  // If the user backgrounded the app mid-prompt and then came back, iOS may
+  // dismiss the system biometric sheet. Re-arm so the next time the lock
+  // screen mounts (or the app returns to foreground while still locked) we
+  // can prompt again. We don't auto-retry on every foreground here because
+  // it would feel pushy; the manual button covers it.
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (s) => {
+      if (s === 'background') autoPromptedRef.current = false;
+    });
+    return () => sub.remove();
+  }, []);
 
   function press(n) {
     if (entered.length >= 4) return;
@@ -31,6 +98,8 @@ export default function LockScreen({ pin, onUnlock }) {
     setEntered((p) => p.slice(0, -1));
     setWrong(false);
   }
+
+  const showBiometricButton = faceIdEnabled && biometricSupported;
 
   return (
     <View
@@ -71,7 +140,7 @@ export default function LockScreen({ pin, onUnlock }) {
       </Text>
 
       {/* Dots */}
-      <View style={{ flexDirection: 'row', gap: 14, marginBottom: 50 }}>
+      <View style={{ flexDirection: 'row', gap: 14, marginBottom: 30 }}>
         {[0, 1, 2, 3].map((i) => (
           <View
             key={i}
@@ -86,6 +155,26 @@ export default function LockScreen({ pin, onUnlock }) {
           />
         ))}
       </View>
+
+      {showBiometricButton && (
+        <TouchableOpacity
+          onPress={tryBiometric}
+          disabled={biometricAttempting}
+          style={{
+            paddingHorizontal: 18,
+            paddingVertical: 10,
+            borderRadius: 12,
+            borderWidth: 1,
+            borderColor: theme.brd2,
+            marginBottom: 20,
+            opacity: biometricAttempting ? 0.5 : 1,
+          }}
+        >
+          <Text style={{ color: theme.t3, fontSize: 13, fontWeight: '500' }}>
+            {biometricAttempting ? 'Authenticating...' : 'Use Face ID'}
+          </Text>
+        </TouchableOpacity>
+      )}
 
       {/* Numpad */}
       <View style={{ flexDirection: 'row', flexWrap: 'wrap', width: 240, justifyContent: 'center' }}>
