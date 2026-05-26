@@ -1,4 +1,5 @@
 import { supabase } from './supabase';
+import { isStaleSessionError, clearStaleSession } from './auth';
 
 // profileApi — read and write the user's profile row.
 // Profile holds tier, AI usage counter, trial state, Stripe IDs.
@@ -9,6 +10,7 @@ export async function fetchProfile() {
   const { data: userData, error: authErr } = await supabase.auth.getUser();
   if (authErr) {
     console.error('fetchProfile auth error:', authErr);
+    if (isStaleSessionError(authErr)) await clearStaleSession();
     throw new Error(authErr.message || 'Auth failed');
   }
   const userId = userData?.user?.id;
@@ -21,6 +23,7 @@ export async function fetchProfile() {
     .maybeSingle();
   if (error) {
     console.error('fetchProfile error:', error);
+    if (isStaleSessionError(error)) await clearStaleSession();
     throw new Error(error.message || 'Failed to fetch profile');
   }
   return data;
@@ -30,7 +33,10 @@ export async function fetchProfile() {
 // only the keys you pass get updated.
 export async function updateProfile(patch) {
   const { data: userData, error: authErr } = await supabase.auth.getUser();
-  if (authErr) throw new Error(authErr.message || 'Auth failed');
+  if (authErr) {
+    if (isStaleSessionError(authErr)) await clearStaleSession();
+    throw new Error(authErr.message || 'Auth failed');
+  }
   const userId = userData?.user?.id;
   if (!userId) throw new Error('Not signed in');
 
@@ -52,7 +58,10 @@ export async function updateProfile(patch) {
 // fire at once.
 export async function incrementAiCounter() {
   const { data: userData, error: authErr } = await supabase.auth.getUser();
-  if (authErr) throw new Error(authErr.message || 'Auth failed');
+  if (authErr) {
+    if (isStaleSessionError(authErr)) await clearStaleSession();
+    throw new Error(authErr.message || 'Auth failed');
+  }
   const userId = userData?.user?.id;
   if (!userId) throw new Error('Not signed in');
 

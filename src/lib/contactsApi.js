@@ -1,4 +1,5 @@
 import { supabase } from './supabase';
+import { isStaleSessionError, clearStaleSession } from './auth';
 
 // Translate a contact from the database (snake_case + extra JSON)
 // into the local app shape (camelCase, flat).
@@ -182,6 +183,7 @@ export async function fetchContacts() {
     .order('created_at', { ascending: false });
   if (error) {
     console.error('fetchContacts error:', error);
+    if (isStaleSessionError(error)) await clearStaleSession();
     throw new Error(error.message || 'Failed to fetch contacts');
   }
   return (data || []).map(fromDb);

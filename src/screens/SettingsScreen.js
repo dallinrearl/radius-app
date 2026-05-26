@@ -43,6 +43,8 @@ import {
 import { testKey as granolaTestKey } from '../utils/granola';
 import { runGranolaSync, reprocessSelfOnlyItems } from '../utils/granolaSync';
 import { createPortalSession } from '../lib/stripeApi';
+import { supabase } from '../lib/supabase';
+import { clearStaleSession } from '../lib/auth';
 import { PRIVACY_POLICY_URL, TERMS_OF_SERVICE_URL } from '../constants/legal';
 import { SUMMARY_LENGTH_OPTIONS, DEFAULT_SUMMARY_LENGTH } from '../utils/ai';
 import * as FileSystem from 'expo-file-system';
@@ -226,6 +228,38 @@ export default function SettingsScreen({
         }
       },
       'Sign out',
+    );
+  }
+
+  function handleDeleteAccount() {
+    confirmAction(
+      'Delete account',
+      'This permanently deletes your account, all of your contacts, and every other piece of data tied to it. This cannot be undone.',
+      () => {
+        confirmAction(
+          'Are you absolutely sure?',
+          'Tap "Delete forever" to wipe your account and all data. There is no recovery.',
+          async () => {
+            try {
+              const { data, error } = await supabase.functions.invoke('delete-account', {
+                body: {},
+              });
+              if (error) throw new Error(error.message || 'Delete failed');
+              if (data?.error) throw new Error(data.error);
+              // Function already revoked refresh tokens server-side; clear the
+              // local session so onAuthStateChange routes to AuthScreen.
+              await clearStaleSession();
+            } catch (e) {
+              Alert.alert(
+                'Delete failed',
+                e.message || 'Something went wrong. Try again or contact support.',
+              );
+            }
+          },
+          'Delete forever',
+        );
+      },
+      'Continue',
     );
   }
 
@@ -867,6 +901,31 @@ export default function SettingsScreen({
             </Text>
             <Text style={{ color: theme.t5, fontSize: 11, marginTop: 2 }}>
               Clears all local data. Account stays.
+            </Text>
+          </View>
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          onPress={handleDeleteAccount}
+          style={{
+            backgroundColor: theme.bgRed,
+            borderWidth: 1,
+            borderColor: theme.brdRed,
+            borderRadius: 14,
+            padding: 14,
+            marginBottom: 10,
+            flexDirection: 'row',
+            alignItems: 'center',
+            gap: 12,
+          }}
+        >
+          <TrashIcon size={18} color={theme.red} />
+          <View style={{ flex: 1 }}>
+            <Text style={{ color: theme.red, fontSize: 14, fontWeight: '600' }}>
+              Delete account
+            </Text>
+            <Text style={{ color: theme.t5, fontSize: 11, marginTop: 2 }}>
+              Deletes account and purges all user data. Cannot be undone.
             </Text>
           </View>
         </TouchableOpacity>
