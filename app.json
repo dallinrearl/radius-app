@@ -1,7 +1,7 @@
 {
   "expo": {
     "name": "Veery",
-    "slug": "radius-app",
+    "slug": "veery-app",
     "version": "1.0.0",
     "scheme": "veery",
     "orientation": "portrait",
@@ -57,7 +57,8 @@
         }
       ],
       "expo-font",
-      "expo-secure-store"
+      "expo-secure-store",
+      "expo-audio"
     ],
     "extra": {
       "eas": {

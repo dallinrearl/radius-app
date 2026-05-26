@@ -1,7 +1,13 @@
 import { useState, useEffect, useCallback } from 'react';
 import { storage } from '../utils/storage';
 import { supabase } from '../lib/supabase';
-import { fetchContacts, syncContacts } from '../lib/contactsApi';
+import {
+  fetchContacts,
+  syncContacts,
+  deleteContact as deleteContactApi,
+  deleteContacts as deleteContactsApi,
+  isSampleContact,
+} from '../lib/contactsApi';
 import { fetchProfile, updateProfile, incrementAiCounter, resetAiCounter } from '../lib/profileApi';
 import { isoToday, addDays, nextDate, daysUntil } from '../utils/helpers';
 import {
@@ -298,6 +304,42 @@ export function useAppStore() {
     },
     [persistContacts],
   );
+
+  // Remove a single contact. Updates local state immediately, then issues
+  // a targeted cloud delete. Use this for any intentional contact deletion
+  // — never delete-by-omission via commit(filter), because syncContacts
+  // is upsert-only and won't propagate the removal.
+  const removeContact = useCallback(
+    async (id) => {
+      setContacts((prev) => prev.filter((c) => c.id !== id));
+      if (!userId) return;
+      try {
+        const result = await deleteContactApi(id);
+        if (!result.ok) {
+          console.error('removeContact failed:', result.message);
+        }
+      } catch (e) {
+        console.error('removeContact error:', e);
+      }
+    },
+    [userId],
+  );
+
+  // Wipe every non-sample contact. Used by the Settings "Delete all contacts"
+  // action. Samples are local-only and stay.
+  const removeAllNonSampleContacts = useCallback(async () => {
+    const realIds = contacts.filter((c) => !isSampleContact(c)).map((c) => c.id);
+    setContacts((prev) => prev.filter(isSampleContact));
+    if (!userId || realIds.length === 0) return;
+    try {
+      const result = await deleteContactsApi(realIds);
+      if (!result.ok) {
+        console.error('removeAllNonSampleContacts failed:', result.message);
+      }
+    } catch (e) {
+      console.error('removeAllNonSampleContacts error:', e);
+    }
+  }, [contacts, userId]);
 
   const saveMyCard = useCallback(async (card) => {
     setMyCard(card);
@@ -717,6 +759,8 @@ export function useAppStore() {
     showPaywall,
     dismissPaywall,
     commit,
+    removeContact,
+    removeAllNonSampleContacts,
     saveMyCard,
     saveCustomTags,
     saveHiddenTags,

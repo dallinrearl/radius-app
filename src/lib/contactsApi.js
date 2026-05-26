@@ -190,49 +190,27 @@ export async function fetchContacts() {
 // Returns true if a contact is a "sample" — local-only, never synced to
 // Supabase. Sample IDs start with 'sample_' (per constants.js getSampleContacts).
 // We also fence on isSample as a belt-and-suspenders check.
-function isSampleContact(c) {
+export function isSampleContact(c) {
   return !!(c && (c.isSample || (typeof c.id === 'string' && c.id.startsWith('sample_'))));
 }
 
-// Sync a full local contacts array to Supabase.
-// Figures out what to insert, update, or delete by comparing IDs.
+// Upsert a local contacts array to Supabase.
+//
+// IMPORTANT: this is upsert-only. It will NEVER delete cloud rows, even if
+// they're missing from `localContacts`. Treating absence-from-local as a
+// delete signal is unsafe — local state is transiently empty during signin
+// before the initial fetch completes, and a stray commit() in that window
+// would otherwise wipe the entire cloud. Real deletes go through
+// deleteContact / deleteContacts, which take explicit ids.
 export async function syncContacts(localContacts, userId) {
   if (!userId) return { ok: false, message: 'Not signed in' };
 
   // Split out sample contacts. Samples are local-only — never written to
-  // or read from Supabase. Without this fence we'd assign them fresh
-  // UUIDs every save, piling up duplicate cloud rows AND breaking
-  // archive/delete (the post-sync re-fetch would replace our local
-  // state with the cloud rows we shouldn't have created in the first place).
+  // or read from Supabase.
   const samples = localContacts.filter(isSampleContact);
   const real = localContacts.filter((c) => !isSampleContact(c));
 
-  // 1. Get current cloud contact IDs so we know what to delete
-  const { data: existing, error: fetchErr } = await supabase
-    .from('contacts')
-    .select('id');
-  if (fetchErr) {
-    console.error('syncContacts fetch error:', fetchErr);
-    return { ok: false, message: fetchErr.message };
-  }
-  const cloudIds = new Set((existing || []).map((r) => r.id));
-  const localIds = new Set(
-    real
-      .filter((c) => isUuid(c.id))
-      .map((c) => c.id),
-  );
-
-  // 2. Delete contacts that exist in cloud but not locally
-  const toDelete = [...cloudIds].filter((id) => !localIds.has(id));
-  if (toDelete.length > 0) {
-    const { error: delErr } = await supabase
-      .from('contacts')
-      .delete()
-      .in('id', toDelete);
-    if (delErr) console.error('delete error:', delErr);
-  }
-
-  // 3. Upsert real contacts (samples skipped). toDb assigns a fresh UUID
+  // Upsert real contacts (samples skipped). toDb assigns a fresh UUID
   // to any contact without one, so all rows have a valid id.
   const rows = real.map((c) => toDb(c, userId));
   if (rows.length > 0) {
@@ -245,7 +223,7 @@ export async function syncContacts(localContacts, userId) {
     }
   }
 
-  // 4. Re-fetch real contacts and merge samples back in. Without this
+  // Re-fetch real contacts and merge samples back in. Without this
   // merge, the post-sync state-set in useAppStore would drop samples.
   try {
     const fresh = await fetchContacts();
@@ -255,4 +233,29 @@ export async function syncContacts(localContacts, userId) {
     console.warn('syncContacts post-fetch failed:', e?.message);
     return { ok: true, contacts: null };
   }
+}
+
+// Delete a single contact by id. No-op for non-UUID ids (samples and
+// legacy local-only ids that were never persisted to the cloud).
+export async function deleteContact(id) {
+  if (!isUuid(id)) return { ok: true };
+  const { error } = await supabase.from('contacts').delete().eq('id', id);
+  if (error) {
+    console.error('deleteContact error:', error);
+    return { ok: false, message: error.message };
+  }
+  return { ok: true };
+}
+
+// Delete multiple contacts by id. Filters out non-UUID ids internally so
+// callers can pass a mixed list (e.g., "everything that isn't a sample").
+export async function deleteContacts(ids) {
+  const uuidIds = (ids || []).filter(isUuid);
+  if (uuidIds.length === 0) return { ok: true };
+  const { error } = await supabase.from('contacts').delete().in('id', uuidIds);
+  if (error) {
+    console.error('deleteContacts error:', error);
+    return { ok: false, message: error.message };
+  }
+  return { ok: true };
 }

@@ -467,7 +467,7 @@ function AppInner() {
     showToast(getDisplayName(c) + ' restored', theme.ac);
   }
   function deleteContact(c) {
-    store.commit(store.contacts.filter((x) => x.id !== c.id));
+    store.removeContact(c.id);
     showToast('Deleted', theme.red);
     setSelected(null);
     setView('list');
@@ -1083,6 +1083,7 @@ function AppInner() {
           onSaveHiddenInterests={store.saveHiddenInterests}
           contacts={store.contacts}
           onCommit={store.commit}
+          onDeleteAllContacts={store.removeAllNonSampleContacts}
           archivedContacts={store.archivedContacts}
           onUnarchive={unarchiveContact}
           onPickContact={(c) => {
