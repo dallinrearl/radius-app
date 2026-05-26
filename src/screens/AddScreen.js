@@ -24,7 +24,7 @@ import {
 } from '../components/Icons';
 import * as Contacts from 'expo-contacts';
 import * as ImagePicker from 'expo-image-picker';
-import { Audio } from 'expo-av';
+import { useAudioRecorder, RecordingPresets, AudioModule, setAudioModeAsync } from 'expo-audio';
 import { CameraView, Camera } from 'expo-camera';
 import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system';
@@ -288,9 +288,9 @@ const VOICE_TIP_GROUPS = [
 ];
 
 function VoiceCapture({ onComplete, onBack }) {
+  const audioRecorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
   const { theme } = useTheme();
   const insets = useSafeAreaInsets();
-  const [recording, setRecording] = useState(null);
   const [recState, setRecState] = useState('idle');
   const [transcript, setTranscript] = useState('');
   const [extracting, setExtracting] = useState(false);
@@ -300,19 +300,17 @@ function VoiceCapture({ onComplete, onBack }) {
 
   async function start() {
     try {
-      const perm = await Audio.requestPermissionsAsync();
+      const perm = await AudioModule.requestRecordingPermissionsAsync();
       if (!perm.granted) {
         Alert.alert('Microphone permission required');
         return;
       }
-      await Audio.setAudioModeAsync({
-        allowsRecordingIOS: true,
-        playsInSilentModeIOS: true,
+      await setAudioModeAsync({
+        allowsRecording: true,
+        playsInSilentMode: true,
       });
-      const { recording } = await Audio.Recording.createAsync(
-        Audio.RecordingOptionsPresets.HIGH_QUALITY,
-      );
-      setRecording(recording);
+      await audioRecorder.prepareToRecordAsync();
+      audioRecorder.record();
       setRecState('recording');
     } catch (e) {
       Alert.alert('Recording failed', e.message);
@@ -321,8 +319,7 @@ function VoiceCapture({ onComplete, onBack }) {
 
   async function stop() {
     try {
-      await recording.stopAndUnloadAsync();
-      setRecording(null);
+      await audioRecorder.stop();
       setRecState('done');
     } catch (e) {
       Alert.alert('Stop failed', e.message);

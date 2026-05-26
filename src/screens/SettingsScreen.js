@@ -81,6 +81,7 @@ export default function SettingsScreen({
   onSaveHiddenInterests,
   contacts,
   onCommit,
+  onDeleteAllContacts,
   archivedContacts,
   onUnarchive,
   onPickContact,
@@ -185,11 +186,8 @@ export default function SettingsScreen({
     confirmAction(
       'Delete all contacts',
       'This permanently deletes every contact you have. Your sample contacts and account stay. This cannot be undone.',
-      () => {
-        const samples = contacts.filter(
-          (c) => c.isSample || (typeof c.id === 'string' && c.id.startsWith('sample_')),
-        );
-        onCommit(samples);
+      async () => {
+        await onDeleteAllContacts();
         showToast && showToast('All contacts deleted', theme.red);
       },
       'Delete all',
