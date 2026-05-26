@@ -126,6 +126,11 @@ function AppInner() {
   const [editForm, setEditForm] = useState(null);
   const [editFlash, setEditFlash] = useState(false);
   const [formReturnView, setFormReturnView] = useState(null);
+  const [formReturnTab, setFormReturnTab] = useState(null);
+  const [detailReturn, setDetailReturn] = useState(null);
+  const [addReturn, setAddReturn] = useState(null);
+  const [addDirectEntry, setAddDirectEntry] = useState(false);
+  const [reviewQueueReturn, setReviewQueueReturn] = useState(null);
   const [dupeWarn, setDupeWarn] = useState(null);
   const [forceSavePending, setForceSavePending] = useState(false);
   const [toast, setToast] = useState(null);
@@ -417,12 +422,18 @@ function AppInner() {
     const ok = commitContact(editForm, forceSavePending);
     if (ok) {
       const returnTo = formReturnView;
+      const returnTab = formReturnTab;
       const savedSnapshot = { ...editForm };
+      if (selected && selected.id === editForm.id) {
+        setSelected(editForm);
+      }
       setEditForm(null);
       setEditFlash(false);
       setForceSavePending(false);
       setFormReturnView(null);
+      setFormReturnTab(null);
       finalizeAttendeeContactIfNeeded(savedSnapshot);
+      if (returnTab) setTab(returnTab);
       if (returnTo) {
         setView(returnTo);
       } else {
@@ -438,12 +449,18 @@ function AppInner() {
     const ok = commitContact(editForm, true);
     if (ok) {
       const returnTo = formReturnView;
+      const returnTab = formReturnTab;
       const savedSnapshot = { ...editForm };
+      if (selected && selected.id === editForm.id) {
+        setSelected(editForm);
+      }
       setEditForm(null);
       setEditFlash(false);
       setForceSavePending(false);
       setFormReturnView(null);
+      setFormReturnTab(null);
       finalizeAttendeeContactIfNeeded(savedSnapshot);
+      if (returnTab) setTab(returnTab);
       if (returnTo) {
         setView(returnTo);
       } else {
@@ -454,12 +471,22 @@ function AppInner() {
     }
   }
 
+  function popDetail() {
+    const back = detailReturn;
+    setSelected(null);
+    setDetailReturn(null);
+    if (back) {
+      setTab(back.tab);
+      setView(back.view);
+    } else {
+      setView('list');
+    }
+  }
   function archiveContact(c) {
     store.commit(store.contacts.map((x) => (x.id === c.id ? { ...x, archived: true } : x)));
     showToast(getDisplayName(c) + ' archived', theme.warn);
     if (selected?.id === c.id) {
-      setSelected(null);
-      setView('list');
+      popDetail();
     }
   }
   function unarchiveContact(c) {
@@ -469,8 +496,7 @@ function AppInner() {
   function deleteContact(c) {
     store.removeContact(c.id);
     showToast('Deleted', theme.red);
-    setSelected(null);
-    setView('list');
+    popDetail();
   }
 
   function updateContact(updated) {
@@ -517,6 +543,7 @@ function AppInner() {
   }
 
   function openReviewQueue() {
+    setReviewQueueReturn({ tab: 'settings' });
     setView('review_queue');
   }
 
@@ -567,6 +594,7 @@ function AppInner() {
     setEditForm(prefill);
     setEditFlash(true);
     setFormReturnView('review_queue');
+    setFormReturnTab(tab);
     setView('edit');
   }
 
@@ -644,6 +672,7 @@ function AppInner() {
       setEditForm(merged);
       setEditFlash(true);
       setFormReturnView('review_queue');
+      setFormReturnTab(tab);
       setView('edit');
       showToast('Review the details and save', theme.ac);
     } catch (e) {
@@ -772,11 +801,10 @@ function AppInner() {
         {globalBanner}
         <DetailScreen
           contact={selected}
-          onBack={() => {
-            setSelected(null);
-            setView('list');
-          }}
+          onBack={popDetail}
           onEdit={() => {
+            setFormReturnView('detail');
+            setFormReturnTab(tab);
             setEditForm({ ...selected });
             setView('edit');
           }}
@@ -808,11 +836,14 @@ function AppInner() {
           onForceSave={forceSave}
           onCancel={() => {
             const returnTo = formReturnView;
+            const returnTab = formReturnTab;
             setEditForm(null);
             setEditFlash(false);
             setDupeWarn(null);
             setFormReturnView(null);
+            setFormReturnTab(null);
             setPendingAttendeeItem(null);
+            if (returnTab) setTab(returnTab);
             if (returnTo) {
               setView(returnTo);
             } else if (selected) {
@@ -925,6 +956,7 @@ function AppInner() {
           onSetAddressOverride={store.setAddressOverride}
           onRemoveFromList={(contact) => store.toggleContactOnList(contact, selectedListId)}
           onPickContact={(c) => {
+            setDetailReturn({ tab: 'settings', view: 'mailing_list_detail' });
             setSelected(c);
             setView('detail');
           }}
@@ -953,8 +985,10 @@ function AppInner() {
           onPatchReviewQueueItem={store.patchReviewQueueItem}
           onCreateContactFromAttendee={createContactFromAttendee}
           onBack={() => {
+            const back = reviewQueueReturn;
+            setReviewQueueReturn(null);
             setView('list');
-            setTab('settings');
+            setTab(back?.tab || 'settings');
           }}
           showToast={showToast}
           granolaAiUnlocked={store.featureUnlocked('granolaAiProcessing')}
@@ -975,16 +1009,19 @@ function AppInner() {
         {globalBanner}
         <AddScreen
           mode={addMode}
+          directEntry={addDirectEntry}
           setMode={(m) => {
             if (m === 'manual') {
+              setFormReturnTab(addReturn?.tab || 'contacts');
+              setAddReturn(null);
+              setAddDirectEntry(false);
               setEditForm({ ...EMPTY_CONTACT });
               setEditFlash(false);
               setView('edit');
               setAddMode(null);
-              setTab('contacts');
             } else if (m === 'granola') {
+              setReviewQueueReturn({ tab: 'add' });
               setAddMode(null);
-              setTab('settings');
               setView('review_queue');
             } else {
               setAddMode(m);
@@ -998,11 +1035,13 @@ function AppInner() {
               seed.lastName = split.lastName;
             }
             delete seed.name;
+            setFormReturnTab(addReturn?.tab || 'contacts');
+            setAddReturn(null);
+            setAddDirectEntry(false);
             setEditForm(seed);
             setEditFlash(true);
             setView('edit');
             setAddMode(null);
-            setTab('contacts');
           }}
           contacts={store.contacts}
           myCard={store.myCard}
@@ -1010,8 +1049,11 @@ function AppInner() {
           showToast={showToast}
           reviewQueue={store.reviewQueue}
           onBack={() => {
+            const back = addReturn;
+            setAddReturn(null);
+            setAddDirectEntry(false);
             setAddMode(null);
-            setTab('contacts');
+            setTab(back?.tab || 'contacts');
           }}
         />
         {globalModals}
@@ -1030,6 +1072,7 @@ function AppInner() {
           overdueN={store.overdueN}
           allTags={store.visibleTags}
           onPickContact={(c) => {
+            setDetailReturn({ tab: 'contacts', view: 'list' });
             setSelected(c);
             setView('detail');
           }}
@@ -1050,6 +1093,7 @@ function AppInner() {
           activeContacts={store.activeContacts}
           allTags={store.visibleTags}
           onPickContact={(c) => {
+            setDetailReturn({ tab: 'nextup', view: 'list' });
             setSelected(c);
             setView('detail');
           }}
@@ -1070,6 +1114,8 @@ function AppInner() {
             setView('edit_mycard');
           }}
           onShareMyCard={() => {
+            setAddReturn({ tab: 'settings' });
+            setAddDirectEntry(true);
             setAddMode('share');
             setTab('add');
           }}
@@ -1087,6 +1133,7 @@ function AppInner() {
           archivedContacts={store.archivedContacts}
           onUnarchive={unarchiveContact}
           onPickContact={(c) => {
+            setDetailReturn({ tab: 'settings', view: 'list' });
             setSelected(c);
             setView('detail');
           }}
@@ -1119,6 +1166,8 @@ function AppInner() {
           onSaveNotificationPrefs={store.saveNotificationPrefs}
           onRegisterPushToken={store.registerPushToken}
           onImportContactsPress={() => {
+            setAddReturn({ tab: 'settings' });
+            setAddDirectEntry(true);
             setAddMode('import');
             setTab('add');
           }}
@@ -1133,6 +1182,8 @@ function AppInner() {
           setView('list');
         }}
         onAddPress={() => {
+          setAddReturn({ tab });
+          setAddDirectEntry(false);
           setTab('add');
           setAddMode(null);
         }}
