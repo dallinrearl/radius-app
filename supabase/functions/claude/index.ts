@@ -1,11 +1,15 @@
 // Supabase Edge Function: claude
 //
-// Proxies requests from the Radius app to the Anthropic Messages API.
+// Proxies requests from the Veery app to the Anthropic Messages API.
 // Reads the API key from the ANTHROPIC_API_KEY secret (set via
 // `npx supabase secrets set`).
 //
-// Expects POST body: { system?: string, prompt: string, max_tokens?: number }
-// Returns: { text: string } on success, { error: string } on failure.
+// Expects POST body:
+//   { system?, prompt, max_tokens?, tools?, tool_choice? }
+// Returns:
+//   { text, tool_input? } on success, { error } on failure.
+// tool_input is the parsed `input` of the first tool_use block, when
+// the client forces structured output via tools/tool_choice.
 
 const ANTHROPIC_URL = 'https://api.anthropic.com/v1/messages';
 const DEFAULT_MODEL = 'claude-sonnet-4-6';
@@ -34,7 +38,13 @@ Deno.serve(async (req) => {
     return json({ error: 'ANTHROPIC_API_KEY is not set' }, 500);
   }
 
-  let body: { system?: string; prompt?: string; max_tokens?: number };
+  let body: {
+    system?: string;
+    prompt?: string;
+    max_tokens?: number;
+    tools?: unknown;
+    tool_choice?: unknown;
+  };
   try {
     body = await req.json();
   } catch {
@@ -52,6 +62,9 @@ Deno.serve(async (req) => {
       ? Math.min(body.max_tokens, 4096)
       : DEFAULT_MAX_TOKENS;
 
+  const tools = Array.isArray(body.tools) && body.tools.length > 0 ? body.tools : undefined;
+  const toolChoice = tools && body.tool_choice ? body.tool_choice : undefined;
+
   // Call the Anthropic Messages API.
   let upstream: Response;
   try {
@@ -67,6 +80,8 @@ Deno.serve(async (req) => {
         max_tokens: maxTokens,
         system,
         messages: [{ role: 'user', content: prompt }],
+        ...(tools ? { tools } : {}),
+        ...(toolChoice ? { tool_choice: toolChoice } : {}),
       }),
     });
   } catch (e) {
@@ -82,22 +97,27 @@ Deno.serve(async (req) => {
   }
 
   const data = await upstream.json();
+  const content = Array.isArray(data?.content) ? data.content : [];
 
-  // The Messages API returns { content: [{ type: 'text', text: '...' }, ...] }.
-  // Concatenate all text blocks into a single string for the client.
-  const text = Array.isArray(data?.content)
-    ? data.content
-        .filter((b: { type: string }) => b?.type === 'text')
-        .map((b: { text: string }) => b.text || '')
-        .join('\n')
-        .trim()
-    : '';
+  // Concatenate any text blocks for the plain-text path.
+  const text = content
+    .filter((b: { type: string }) => b?.type === 'text')
+    .map((b: { text: string }) => b.text || '')
+    .join('\n')
+    .trim();
 
-  if (!text) {
-    return json({ error: 'No text returned from Anthropic' }, 502);
+  // If the client forced a tool, pull the parsed input from the first
+  // tool_use block. The client treats `tool_input` as the structured result.
+  const toolUse = tools
+    ? content.find((b: { type: string }) => b?.type === 'tool_use')
+    : undefined;
+  const toolInput = toolUse?.input;
+
+  if (!text && !toolInput) {
+    return json({ error: 'No content returned from Anthropic' }, 502);
   }
 
-  return json({ text });
+  return json({ text, ...(toolInput !== undefined ? { tool_input: toolInput } : {}) });
 });
 
 function json(payload: unknown, status = 200) {
