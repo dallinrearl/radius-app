@@ -147,10 +147,10 @@ function AppInner() {
   const [aiFillPrompt, setAiFillPrompt] = useState(null);
 
   useEffect(() => {
-    if (store.loaded && store.pin) {
+    if (store.loaded && store.hasPin) {
       setLocked(true);
     }
-  }, [store.loaded, store.pin]);
+  }, [store.loaded, store.hasPin]);
 
   useEffect(() => {
     const subscription = onAuthChange((u) => {
@@ -779,12 +779,24 @@ function AppInner() {
       />
     );
   }
-  if (locked) {
+  // Gate on hasPin too: if a previous lockout cleared the PIN but the
+  // `locked` state is still true from before, hasPin will be false and we
+  // skip the lock screen entirely so the user isn't stranded post-re-auth.
+  if (locked && store.hasPin) {
     return (
       <LockScreen
-        pin={store.pin}
+        hasPin={store.hasPin}
+        onVerifyPin={store.verifyPin}
         faceIdEnabled={store.faceIdEnabled}
         onUnlock={() => setLocked(false)}
+        onLockout={async () => {
+          // Force re-auth: clearing the PIN breaks the lockout loop that
+          // would otherwise re-trigger immediately after re-sign-in (the
+          // attempt counter would still be at MAX). User can set a new PIN
+          // from Security once they're back in.
+          try { await store.removePin(); } catch (_) {}
+          handleSignOut();
+        }}
       />
     );
   }
@@ -914,8 +926,8 @@ function AppInner() {
       <View style={{ flex: 1 }}>
         {globalBanner}
         <SecurityScreen
-          pin={store.pin}
-          onSavePin={store.savePin}
+          hasPin={store.hasPin}
+          onSetPin={store.setPin}
           onRemovePin={store.removePin}
           faceIdEnabled={store.faceIdEnabled}
           onSaveFaceIdEnabled={store.saveFaceIdEnabled}
@@ -923,8 +935,6 @@ function AppInner() {
           onSaveDisplayName={store.saveDisplayName}
           username={store.username}
           onSaveUsername={store.saveUsername}
-          password={store.password}
-          onSavePassword={store.savePassword}
           onBack={() => setView('list')}
           showToast={showToast}
         />
@@ -1353,8 +1363,9 @@ export default function App() {
       const result = await migrateInsecureStorage();
       if (result.status === 'error') {
         console.warn(
-          '[secureMigration] failed; will retry next launch:',
-          result.error?.message,
+          '[secureMigration] errors; will retry next launch:',
+          result.v1?.error?.message,
+          result.v2?.error?.message,
         );
       }
       setMigrationDone(true);

@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { storage } from '../utils/storage';
 import { supabase } from '../lib/supabase';
+import * as securePin from '../lib/securePin';
 import {
   fetchContacts,
   syncContacts,
@@ -64,11 +65,10 @@ export function useAppStore() {
   const [hiddenTags, setHiddenTags] = useState([]);
   const [customInterests, setCustomInterests] = useState([]);
   const [hiddenInterests, setHiddenInterests] = useState([]);
-  const [pin, setPin] = useState(null);
+  const [hasPin, setHasPin] = useState(false);
   const [faceIdEnabled, setFaceIdEnabled] = useState(false);
   const [displayName, setDisplayName] = useState('');
   const [username, setUsername] = useState('');
-  const [password, setPassword] = useState('');
   const [onboarded, setOnboarded] = useState(true);
 
   const [useType, setUseType] = useState([]);
@@ -186,8 +186,8 @@ export function useAppStore() {
         if (r?.value) setHiddenInterests(JSON.parse(r.value));
       } catch (_) {}
       try {
-        const r = await storage.get('crm-pin');
-        if (r?.value) setPin(r.value);
+        const present = await securePin.hasPin();
+        if (present) setHasPin(true);
       } catch (_) {}
       try {
         const r = await storage.get('crm-face-id-enabled');
@@ -200,10 +200,6 @@ export function useAppStore() {
       try {
         const r = await storage.get('crm-username');
         if (r?.value) setUsername(r.value);
-      } catch (_) {}
-      try {
-        const r = await storage.get('crm-password');
-        if (r?.value) setPassword(r.value);
       } catch (_) {}
       try {
         const r = await storage.get('crm-use-type');
@@ -623,18 +619,15 @@ export function useAppStore() {
     saveCustomInterests([...customInterests, name.trim()]);
   };
 
-  const savePin = async (p) => {
-    setPin(p);
-    try {
-      await storage.set('crm-pin', p);
-    } catch (_) {}
+  const setPin = async (p) => {
+    await securePin.setPin(p);
+    setHasPin(true);
   };
+  const verifyPin = useCallback((raw) => securePin.verifyPin(raw), []);
   const removePin = async () => {
-    setPin(null);
+    await securePin.clearPin();
+    setHasPin(false);
     setFaceIdEnabled(false);
-    try {
-      await storage.delete('crm-pin');
-    } catch (_) {}
     try {
       await storage.delete('crm-face-id-enabled');
     } catch (_) {}
@@ -656,12 +649,6 @@ export function useAppStore() {
     setUsername(n);
     try {
       await storage.set('crm-username', n);
-    } catch (_) {}
-  };
-  const savePassword = async (n) => {
-    setPassword(n);
-    try {
-      await storage.set('crm-password', n);
     } catch (_) {}
   };
 
@@ -774,11 +761,10 @@ export function useAppStore() {
     visibleTags,
     allInterests,
     visibleInterests,
-    pin,
+    hasPin,
     faceIdEnabled,
     displayName,
     username,
-    password,
     onboarded,
     useType,
     samplesRequested,
@@ -820,12 +806,12 @@ export function useAppStore() {
     saveCustomInterests,
     saveHiddenInterests,
     addCustomInterest,
-    savePin,
+    setPin,
+    verifyPin,
     removePin,
     saveFaceIdEnabled,
     saveDisplayName,
     saveUsername,
-    savePassword,
     saveUseType,
     saveSamplesRequested,
     saveMeetingSummaryLength,
