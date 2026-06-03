@@ -81,6 +81,36 @@ export async function clearPin() {
   await resetAttempts();
 }
 
+// Snapshot the live PIN state to a per-userId namespace so we can restore
+// it if this user signs back in later. Called before clearing/replacing
+// live state during a user switch.
+export async function backupForUser(userId) {
+  if (!userId) return;
+  for (const k of [SECURE_PIN_HASH_KEY, SECURE_PIN_SALT_KEY, ATTEMPTS_KEY]) {
+    const v = await SecureStore.getItemAsync(k);
+    const bk = `backup-${userId}-${k}`;
+    if (v != null) {
+      await SecureStore.setItemAsync(bk, v, PIN_KEYCHAIN_OPTS);
+    } else {
+      try { await SecureStore.deleteItemAsync(bk); } catch (_) {}
+    }
+  }
+}
+
+// Restore a previously-snapshotted PIN state into live keys. Caller should
+// clearPin() first if they want guaranteed-empty defaults for users with
+// no prior backup.
+export async function restoreForUser(userId) {
+  if (!userId) return;
+  for (const k of [SECURE_PIN_HASH_KEY, SECURE_PIN_SALT_KEY, ATTEMPTS_KEY]) {
+    const bk = `backup-${userId}-${k}`;
+    const v = await SecureStore.getItemAsync(bk);
+    if (v != null) {
+      await SecureStore.setItemAsync(k, v, PIN_KEYCHAIN_OPTS);
+    }
+  }
+}
+
 export async function getAttemptsRemaining() {
   const attempts = await readAttempts();
   return Math.max(0, MAX_PIN_ATTEMPTS - attempts);
