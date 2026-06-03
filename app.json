@@ -61,7 +61,8 @@
       ],
       "expo-font",
       "expo-secure-store",
-      "expo-audio"
+      "expo-audio",
+      "expo-asset"
     ],
     "extra": {
       "eas": {
