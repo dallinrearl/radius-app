@@ -147,10 +147,10 @@ function AppInner() {
   const [aiFillPrompt, setAiFillPrompt] = useState(null);
 
   useEffect(() => {
-    if (store.loaded && store.pin) {
+    if (store.loaded && store.hasPin) {
       setLocked(true);
     }
-  }, [store.loaded, store.pin]);
+  }, [store.loaded, store.hasPin]);
 
   useEffect(() => {
     const subscription = onAuthChange((u) => {
@@ -779,12 +779,24 @@ function AppInner() {
       />
     );
   }
-  if (locked) {
+  // Gate on hasPin too: if a previous lockout cleared the PIN but the
+  // `locked` state is still true from before, hasPin will be false and we
+  // skip the lock screen entirely so the user isn't stranded post-re-auth.
+  if (locked && store.hasPin) {
     return (
       <LockScreen
-        pin={store.pin}
+        hasPin={store.hasPin}
+        onVerifyPin={store.verifyPin}
         faceIdEnabled={store.faceIdEnabled}
         onUnlock={() => setLocked(false)}
+        onLockout={async () => {
+          // Force re-auth: clearing the PIN breaks the lockout loop that
+          // would otherwise re-trigger immediately after re-sign-in (the
+          // attempt counter would still be at MAX). User can set a new PIN
+          // from Security once they're back in.
+          try { await store.removePin(); } catch (_) {}
+          handleSignOut();
+        }}
       />
     );
   }
@@ -914,8 +926,8 @@ function AppInner() {
       <View style={{ flex: 1 }}>
         {globalBanner}
         <SecurityScreen
-          pin={store.pin}
-          onSavePin={store.savePin}
+          hasPin={store.hasPin}
+          onSetPin={store.setPin}
           onRemovePin={store.removePin}
           faceIdEnabled={store.faceIdEnabled}
           onSaveFaceIdEnabled={store.saveFaceIdEnabled}
@@ -923,8 +935,6 @@ function AppInner() {
           onSaveDisplayName={store.saveDisplayName}
           username={store.username}
           onSaveUsername={store.saveUsername}
-          password={store.password}
-          onSavePassword={store.savePassword}
           onBack={() => setView('list')}
           showToast={showToast}
         />
@@ -1353,8 +1363,9 @@ export default function App() {
       const result = await migrateInsecureStorage();
       if (result.status === 'error') {
         console.warn(
-          '[secureMigration] failed; will retry next launch:',
-          result.error?.message,
+          '[secureMigration] errors; will retry next launch:',
+          result.v1?.error?.message,
+          result.v2?.error?.message,
         );
       }
       setMigrationDone(true);
@@ -1366,7 +1377,63 @@ export default function App() {
   // Stripped from release builds by the __DEV__ guard.
   useEffect(() => {
     if (__DEV__) {
-      globalThis.__debug = { AsyncStorage, SecureStore, supabase };
+      globalThis.__debug = {
+        AsyncStorage,
+        SecureStore,
+        supabase,
+
+        // Reports where the Supabase session token currently lives — new
+        // ciphertext-in-AsyncStorage format, post-v1 plaintext-in-SecureStore,
+        // legacy plaintext-in-AsyncStorage, or nothing. Use to verify the
+        // LargeSecureStore adapter is working.
+        async verifyStorage() {
+          const url = supabase.supabaseUrl || process.env.EXPO_PUBLIC_SUPABASE_URL;
+          const projectRef = url?.match(/^https?:\/\/([^.]+)\./i)?.[1];
+          if (!projectRef) {
+            console.log('verifyStorage: could not extract project ref from', url);
+            return;
+          }
+          const key = `sb-${projectRef}-auth-token`;
+          const encKey = `${key}-enckey`;
+          const [asyncVal, secureLegacy, secureEncKey] = await Promise.all([
+            AsyncStorage.getItem(key),
+            SecureStore.getItemAsync(key),
+            SecureStore.getItemAsync(encKey),
+          ]);
+          const sniff = (v) => v == null ? null : `${v.slice(0, 40)}... (${v.length} chars)`;
+          console.log('project ref:', projectRef);
+          console.log(`AsyncStorage[${key}]:`, sniff(asyncVal));
+          console.log(`SecureStore[${key}] (legacy plaintext):`, sniff(secureLegacy));
+          console.log(`SecureStore[${encKey}] (encryption key):`, sniff(secureEncKey));
+          let state;
+          if (asyncVal && asyncVal.startsWith('{')) {
+            state = 'LEGACY PLAINTEXT in AsyncStorage (pre-migration)';
+          } else if (asyncVal && /^[0-9a-f]+$/i.test(asyncVal) && secureEncKey) {
+            state = 'NEW FORMAT — ciphertext in AsyncStorage + key in SecureStore (good)';
+          } else if (!asyncVal && secureLegacy) {
+            state = 'POST-V1 LEGACY — plaintext in SecureStore (this is what triggers the size warning; refresh once to upgrade)';
+          } else if (!asyncVal && !secureLegacy) {
+            state = 'NO TOKEN STORED — not signed in?';
+          } else {
+            state = 'INCONSISTENT — multiple states present';
+          }
+          console.log('=> state:', state);
+          return state;
+        },
+
+        // Forces a token refresh and re-runs verifyStorage so you can watch
+        // the format flip from legacy to new without waiting for the
+        // ~10-minute auto-refresh.
+        async refreshAndVerify() {
+          console.log('--- before refresh ---');
+          await globalThis.__debug.verifyStorage();
+          console.log('refreshing session...');
+          const r = await supabase.auth.refreshSession();
+          console.log('refresh result:', r.error || 'ok');
+          console.log('--- after refresh ---');
+          return globalThis.__debug.verifyStorage();
+        },
+      };
     }
   }, []);
 

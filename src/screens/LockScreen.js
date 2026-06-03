@@ -5,11 +5,20 @@ import * as LocalAuthentication from 'expo-local-authentication';
 import { useTheme } from '../styles/theme';
 import { LockIcon } from '../components/Icons';
 
-export default function LockScreen({ pin, faceIdEnabled, onUnlock }) {
+export default function LockScreen({
+  hasPin,
+  onVerifyPin,
+  faceIdEnabled,
+  onUnlock,
+  onLockout,
+}) {
   const { theme } = useTheme();
   const insets = useSafeAreaInsets();
   const [entered, setEntered] = useState('');
   const [wrong, setWrong] = useState(false);
+  const [verifying, setVerifying] = useState(false);
+  const [lockedOut, setLockedOut] = useState(false);
+  const [attemptsRemaining, setAttemptsRemaining] = useState(null);
   const [biometricSupported, setBiometricSupported] = useState(false);
   const [biometricAttempting, setBiometricAttempting] = useState(false);
   // Guard so we only auto-prompt once per mount. Manual taps on the button
@@ -77,24 +86,40 @@ export default function LockScreen({ pin, faceIdEnabled, onUnlock }) {
     return () => sub.remove();
   }, []);
 
-  function press(n) {
-    if (entered.length >= 4) return;
+  async function press(n) {
+    if (entered.length >= 4 || verifying || lockedOut || !hasPin) return;
     const next = entered + n;
     setEntered(next);
     setWrong(false);
     if (next.length === 4) {
-      setTimeout(() => {
-        if (next === pin) {
-          onUnlock();
-        } else {
-          setWrong(true);
-          setEntered('');
-        }
-      }, 150);
+      setVerifying(true);
+      let result;
+      try {
+        result = await onVerifyPin(next);
+      } catch (_) {
+        result = { ok: false, lockedOut: false, attemptsRemaining: null };
+      }
+      setVerifying(false);
+      if (result.ok) {
+        onUnlock();
+        return;
+      }
+      setEntered('');
+      setWrong(true);
+      if (typeof result.attemptsRemaining === 'number') {
+        setAttemptsRemaining(result.attemptsRemaining);
+      }
+      if (result.lockedOut) {
+        setLockedOut(true);
+        // Tell App.js to sign the user out so they can re-auth and reset
+        // the PIN. Defer one tick so the lockout UI renders first.
+        if (onLockout) setTimeout(onLockout, 1500);
+      }
     }
   }
 
   function backspace() {
+    if (verifying || lockedOut) return;
     setEntered((p) => p.slice(0, -1));
     setWrong(false);
   }
@@ -135,8 +160,24 @@ export default function LockScreen({ pin, faceIdEnabled, onUnlock }) {
       >
         Enter PIN
       </Text>
-      <Text style={{ fontSize: 13, color: wrong ? theme.red : theme.t5, marginBottom: 30 }}>
-        {wrong ? 'Wrong PIN. Try again.' : '4 digits'}
+      <Text
+        style={{
+          fontSize: 13,
+          color: lockedOut || wrong ? theme.red : theme.t5,
+          marginBottom: 30,
+          textAlign: 'center',
+          paddingHorizontal: 24,
+        }}
+      >
+        {lockedOut
+          ? 'Too many wrong PINs. Signing out…'
+          : wrong && attemptsRemaining != null && attemptsRemaining <= 3
+            ? `Wrong PIN. ${attemptsRemaining} attempt${attemptsRemaining === 1 ? '' : 's'} left.`
+            : wrong
+              ? 'Wrong PIN. Try again.'
+              : verifying
+                ? 'Checking…'
+                : '4 digits'}
       </Text>
 
       {/* Dots */}

@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { storage } from '../utils/storage';
 import { supabase } from '../lib/supabase';
+import * as securePin from '../lib/securePin';
 import {
   fetchContacts,
   syncContacts,
@@ -47,6 +48,40 @@ const QUEUE_MIGRATION_DONE_KEY = 'crm-queue-migration-self-attendee-done-v1';
 // AsyncStorage key for the meeting-summary length preference.
 const MEETING_SUMMARY_LENGTH_KEY = 'crm-meeting-summary-length';
 
+// Tracks which user's local state we're currently set up for. When a
+// different user signs in on the same device we wipe the user-bound keys
+// below so the new account doesn't inherit anything from the previous one.
+const LAST_USER_ID_KEY = 'crm-last-user-id';
+
+// AsyncStorage keys that hold per-user data and must be wiped when a
+// different user signs in. NOT wiped: crm-theme (per-device preference),
+// migration flags, Supabase session token (managed by Supabase signOut).
+const USER_BOUND_KEYS = [
+  'crm-mycard',
+  'crm-tags',
+  'crm-hidden-tags',
+  'crm-interests',
+  'crm-hidden-interests',
+  'crm-displayname',
+  'crm-username',
+  'crm-use-type',
+  'crm-samples-requested',
+  'crm-samples-banner-dismissed',
+  'crm-onboarded',
+  'crm-face-id-enabled',
+  'crm-meeting-summary-length',
+  'crm-mailing-lists',
+  'crm-mailing-lists-seeded',
+  'crm-review-queue',
+  'crm-queue-migration-self-attendee-done-v1',
+  'crm-granola-key',
+  'crm-granola-last-sync',
+  'crm-granola-processed-ids',
+  'crm-ai-outreach-cache',
+  'crm-trial-toast-1d',
+  'crm-trial-toast-3d',
+];
+
 function newMailingList(name) {
   return {
     id: 'list_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6),
@@ -64,11 +99,10 @@ export function useAppStore() {
   const [hiddenTags, setHiddenTags] = useState([]);
   const [customInterests, setCustomInterests] = useState([]);
   const [hiddenInterests, setHiddenInterests] = useState([]);
-  const [pin, setPin] = useState(null);
+  const [hasPin, setHasPin] = useState(false);
   const [faceIdEnabled, setFaceIdEnabled] = useState(false);
   const [displayName, setDisplayName] = useState('');
   const [username, setUsername] = useState('');
-  const [password, setPassword] = useState('');
   const [onboarded, setOnboarded] = useState(true);
 
   const [useType, setUseType] = useState([]);
@@ -91,18 +125,144 @@ export function useAppStore() {
 
   useEffect(() => {
     let mounted = true;
+
+    // Re-reads all user-bound state from live AsyncStorage / SecureStore
+    // into React state. Called after restoring a user's backup so the UI
+    // reflects their data immediately without waiting for a remount.
+    async function reloadStateFromLive(metaOnboarded) {
+      try {
+        const r = await storage.get('crm-mycard');
+        setMyCard(r?.value ? JSON.parse(r.value) : { ...EMPTY_CONTACT });
+      } catch (_) { setMyCard({ ...EMPTY_CONTACT }); }
+      try {
+        const r = await storage.get('crm-tags');
+        setCustomTags(r?.value ? JSON.parse(r.value) : []);
+      } catch (_) { setCustomTags([]); }
+      try {
+        const r = await storage.get('crm-hidden-tags');
+        setHiddenTags(r?.value ? JSON.parse(r.value) : []);
+      } catch (_) { setHiddenTags([]); }
+      try {
+        const r = await storage.get('crm-interests');
+        setCustomInterests(r?.value ? JSON.parse(r.value) : []);
+      } catch (_) { setCustomInterests([]); }
+      try {
+        const r = await storage.get('crm-hidden-interests');
+        setHiddenInterests(r?.value ? JSON.parse(r.value) : []);
+      } catch (_) { setHiddenInterests([]); }
+      try { setHasPin(await securePin.hasPin()); } catch (_) { setHasPin(false); }
+      try {
+        const r = await storage.get('crm-face-id-enabled');
+        setFaceIdEnabled(r?.value === '1');
+      } catch (_) { setFaceIdEnabled(false); }
+      try {
+        const r = await storage.get('crm-displayname');
+        setDisplayName(r?.value || '');
+      } catch (_) { setDisplayName(''); }
+      try {
+        const r = await storage.get('crm-username');
+        setUsername(r?.value || '');
+      } catch (_) { setUsername(''); }
+      try {
+        const r = await storage.get('crm-use-type');
+        setUseType(r?.value ? JSON.parse(r.value) : []);
+      } catch (_) { setUseType([]); }
+      try {
+        const r = await storage.get('crm-samples-requested');
+        if (r?.value === 'true') setSamplesRequestedState(true);
+        else if (r?.value === 'false') setSamplesRequestedState(false);
+        else setSamplesRequestedState(null);
+      } catch (_) { setSamplesRequestedState(null); }
+      try {
+        const r = await storage.get('crm-samples-banner-dismissed');
+        setSamplesBannerDismissedState(r?.value === 'true');
+      } catch (_) { setSamplesBannerDismissedState(false); }
+      try {
+        const r = await storage.get(MEETING_SUMMARY_LENGTH_KEY);
+        if (r?.value && SUMMARY_LENGTH_OPTIONS[r.value]) {
+          setMeetingSummaryLengthState(r.value);
+        } else {
+          setMeetingSummaryLengthState(DEFAULT_SUMMARY_LENGTH);
+        }
+      } catch (_) { setMeetingSummaryLengthState(DEFAULT_SUMMARY_LENGTH); }
+      try {
+        const r = await storage.get('crm-mailing-lists');
+        setMailingLists(r?.value ? JSON.parse(r.value) : []);
+      } catch (_) { setMailingLists([]); }
+      try {
+        const r = await storage.get(REVIEW_QUEUE_STORAGE);
+        if (r?.value) {
+          const v = JSON.parse(r.value);
+          setReviewQueue(Array.isArray(v) ? v : []);
+        } else {
+          setReviewQueue([]);
+        }
+      } catch (_) { setReviewQueue([]); }
+      setContacts([]);
+      setProfile(null);
+      setPaywallReason(null);
+      setOnboarded(!!metaOnboarded);
+    }
+
+    // Snapshot the leaving user's live data into a per-userId backup
+    // namespace, wipe live, restore the arriving user's backup if any,
+    // then sync React state to whatever's now live. Preserves both users'
+    // local-only state (PIN, mailing lists, Granola key, etc.) across
+    // switches — no data lost.
+    async function switchToUser(prevUserId, newUserId, metaOnboarded) {
+      if (prevUserId) {
+        for (const k of USER_BOUND_KEYS) {
+          const r = await storage.get(k);
+          const bk = `backup:${prevUserId}:${k}`;
+          if (r?.value != null) await storage.set(bk, r.value);
+          else await storage.delete(bk);
+        }
+        await securePin.backupForUser(prevUserId);
+      }
+
+      await Promise.all(USER_BOUND_KEYS.map((k) => storage.delete(k)));
+      try { await securePin.clearPin(); } catch (_) {}
+
+      for (const k of USER_BOUND_KEYS) {
+        const bk = `backup:${newUserId}:${k}`;
+        const r = await storage.get(bk);
+        if (r?.value != null) await storage.set(k, r.value);
+      }
+      try { await securePin.restoreForUser(newUserId); } catch (_) {}
+
+      await reloadStateFromLive(metaOnboarded);
+    }
+
+    async function applySession(session) {
+      if (!mounted) return;
+      const newUserId = session?.user?.id || null;
+
+      if (newUserId) {
+        const lastRec = await storage.get(LAST_USER_ID_KEY);
+        const lastUserId = lastRec?.value || null;
+        if (lastUserId && lastUserId !== newUserId) {
+          const metaOnboarded = session.user.user_metadata?.onboarded === true;
+          await switchToUser(lastUserId, newUserId, metaOnboarded);
+        }
+        await storage.set(LAST_USER_ID_KEY, newUserId);
+      }
+
+      if (!mounted) return;
+      setUserId(newUserId);
+      if (session?.user) {
+        setOnboarded(session.user.user_metadata?.onboarded === true);
+      }
+    }
+
     (async () => {
       const { data: { session } } = await supabase.auth.getSession();
-      if (mounted) setUserId(session?.user?.id || null);
+      await applySession(session);
     })();
+
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
-      setUserId(session?.user?.id || null);
-      // Fresh sign-in on a new device picks up the account-bound onboarded
-      // flag from user_metadata so the user doesn't re-onboard.
-      if (session?.user?.user_metadata?.onboarded === true) {
-        setOnboarded(true);
-      }
+      applySession(session);
     });
+
     return () => {
       mounted = false;
       subscription.unsubscribe();
@@ -186,8 +346,8 @@ export function useAppStore() {
         if (r?.value) setHiddenInterests(JSON.parse(r.value));
       } catch (_) {}
       try {
-        const r = await storage.get('crm-pin');
-        if (r?.value) setPin(r.value);
+        const present = await securePin.hasPin();
+        if (present) setHasPin(true);
       } catch (_) {}
       try {
         const r = await storage.get('crm-face-id-enabled');
@@ -200,10 +360,6 @@ export function useAppStore() {
       try {
         const r = await storage.get('crm-username');
         if (r?.value) setUsername(r.value);
-      } catch (_) {}
-      try {
-        const r = await storage.get('crm-password');
-        if (r?.value) setPassword(r.value);
       } catch (_) {}
       try {
         const r = await storage.get('crm-use-type');
@@ -623,18 +779,15 @@ export function useAppStore() {
     saveCustomInterests([...customInterests, name.trim()]);
   };
 
-  const savePin = async (p) => {
-    setPin(p);
-    try {
-      await storage.set('crm-pin', p);
-    } catch (_) {}
+  const setPin = async (p) => {
+    await securePin.setPin(p);
+    setHasPin(true);
   };
+  const verifyPin = useCallback((raw) => securePin.verifyPin(raw), []);
   const removePin = async () => {
-    setPin(null);
+    await securePin.clearPin();
+    setHasPin(false);
     setFaceIdEnabled(false);
-    try {
-      await storage.delete('crm-pin');
-    } catch (_) {}
     try {
       await storage.delete('crm-face-id-enabled');
     } catch (_) {}
@@ -656,12 +809,6 @@ export function useAppStore() {
     setUsername(n);
     try {
       await storage.set('crm-username', n);
-    } catch (_) {}
-  };
-  const savePassword = async (n) => {
-    setPassword(n);
-    try {
-      await storage.set('crm-password', n);
     } catch (_) {}
   };
 
@@ -774,11 +921,10 @@ export function useAppStore() {
     visibleTags,
     allInterests,
     visibleInterests,
-    pin,
+    hasPin,
     faceIdEnabled,
     displayName,
     username,
-    password,
     onboarded,
     useType,
     samplesRequested,
@@ -820,12 +966,12 @@ export function useAppStore() {
     saveCustomInterests,
     saveHiddenInterests,
     addCustomInterest,
-    savePin,
+    setPin,
+    verifyPin,
     removePin,
     saveFaceIdEnabled,
     saveDisplayName,
     saveUsername,
-    savePassword,
     saveUseType,
     saveSamplesRequested,
     saveMeetingSummaryLength,

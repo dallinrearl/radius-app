@@ -8,8 +8,8 @@ import { Toggle } from '../components/Common';
 import { LockIcon, UserIcon } from '../components/Icons';
 
 export default function SecurityScreen({
-  pin,
-  onSavePin,
+  hasPin,
+  onSetPin,
   onRemovePin,
   faceIdEnabled,
   onSaveFaceIdEnabled,
@@ -17,8 +17,6 @@ export default function SecurityScreen({
   onSaveDisplayName,
   username,
   onSaveUsername,
-  password,
-  onSavePassword,
   onBack,
   showToast,
 }) {
@@ -26,7 +24,6 @@ export default function SecurityScreen({
   const insets = useSafeAreaInsets();
   const [name, setName] = useState(displayName || '');
   const [user, setUser] = useState(username || '');
-  const [pass, setPass] = useState(password || '');
   const [pinMode, setPinMode] = useState(null);
   const [newPin, setNewPin] = useState('');
   const [confirmPin, setConfirmPin] = useState('');
@@ -59,7 +56,7 @@ export default function SecurityScreen({
   }, []);
 
   async function handleToggleFaceId(nextValue) {
-    if (!pin) {
+    if (!hasPin) {
       Alert.alert('Set a PIN first', 'Biometric unlock needs a PIN as the fallback.');
       return;
     }
@@ -123,7 +120,6 @@ export default function SecurityScreen({
   function saveProfile() {
     onSaveDisplayName(name);
     onSaveUsername(user);
-    onSavePassword(pass);
     showToast('Profile saved');
   }
 
@@ -133,7 +129,7 @@ export default function SecurityScreen({
     setConfirmPin('');
   }
 
-  function commitPin() {
+  async function commitPin() {
     if (newPin.length !== 4 || !/^\d{4}$/.test(newPin)) {
       Alert.alert('PIN must be 4 digits');
       return;
@@ -142,11 +138,15 @@ export default function SecurityScreen({
       Alert.alert('PINs don\'t match');
       return;
     }
-    onSavePin(newPin);
-    showToast('PIN saved');
-    setPinMode(null);
-    setNewPin('');
-    setConfirmPin('');
+    try {
+      await onSetPin(newPin);
+      showToast('PIN saved');
+      setPinMode(null);
+      setNewPin('');
+      setConfirmPin('');
+    } catch (e) {
+      Alert.alert('Could not save PIN', e?.message || 'Try again.');
+    }
   }
 
   function confirmRemove() {
@@ -200,19 +200,11 @@ export default function SecurityScreen({
               autoCapitalize="none"
             />
           </Field>
-          <Field label="Password">
-            <StyledInput
-              value={pass}
-              onChangeText={setPass}
-              placeholder="Optional"
-              secureTextEntry
-            />
-          </Field>
           <PrimaryButton onPress={saveProfile} label="Save Profile" />
         </Section>
 
         <Section label="Lock Screen">
-          {pin ? (
+          {hasPin ? (
             <View
               style={{
                 backgroundColor: theme.bgAc,
@@ -297,10 +289,10 @@ export default function SecurityScreen({
           ) : (
             <View style={{ gap: 8 }}>
               <PrimaryButton
-                onPress={() => startPinChange(pin ? 'change' : 'set')}
-                label={pin ? 'Change PIN' : 'Set PIN'}
+                onPress={() => startPinChange(hasPin ? 'change' : 'set')}
+                label={hasPin ? 'Change PIN' : 'Set PIN'}
               />
-              {pin && (
+              {hasPin && (
                 <TouchableOpacity
                   onPress={confirmRemove}
                   style={{
@@ -340,7 +332,7 @@ export default function SecurityScreen({
               flexDirection: 'row',
               alignItems: 'center',
               gap: 12,
-              opacity: pin && biometricAvailable ? 1 : 0.5,
+              opacity: hasPin && biometricAvailable ? 1 : 0.5,
             }}
           >
             <View style={{ flex: 1 }}>
@@ -348,7 +340,7 @@ export default function SecurityScreen({
                 Unlock with {biometricLabel}
               </Text>
               <Text style={{ color: theme.t5, fontSize: 11, marginTop: 2 }}>
-                {!pin
+                {!hasPin
                   ? 'Set a PIN first to enable biometric unlock.'
                   : !biometricAvailable
                     ? `${biometricLabel} is not available on this device.`
