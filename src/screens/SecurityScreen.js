@@ -1,14 +1,18 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { View, Text, ScrollView, TouchableOpacity, Alert } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import * as LocalAuthentication from 'expo-local-authentication';
 import { useTheme } from '../styles/theme';
 import { Section, Field, StyledInput, PrimaryButton, BackButton } from '../components/Common';
+import { Toggle } from '../components/Common';
 import { LockIcon, UserIcon } from '../components/Icons';
 
 export default function SecurityScreen({
   pin,
   onSavePin,
   onRemovePin,
+  faceIdEnabled,
+  onSaveFaceIdEnabled,
   displayName,
   onSaveDisplayName,
   username,
@@ -26,6 +30,95 @@ export default function SecurityScreen({
   const [pinMode, setPinMode] = useState(null);
   const [newPin, setNewPin] = useState('');
   const [confirmPin, setConfirmPin] = useState('');
+  const [biometricAvailable, setBiometricAvailable] = useState(false);
+  const [biometricLabel, setBiometricLabel] = useState('Face ID');
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const hasHw = await LocalAuthentication.hasHardwareAsync();
+        const enrolled = await LocalAuthentication.isEnrolledAsync();
+        const types = await LocalAuthentication.supportedAuthenticationTypesAsync();
+        const label = types.includes(LocalAuthentication.AuthenticationType.FACIAL_RECOGNITION)
+          ? 'Face ID'
+          : types.includes(LocalAuthentication.AuthenticationType.FINGERPRINT)
+            ? 'Touch ID'
+            : 'Biometrics';
+        if (!cancelled) {
+          setBiometricAvailable(hasHw && enrolled);
+          setBiometricLabel(label);
+        }
+      } catch (_) {
+        if (!cancelled) setBiometricAvailable(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  async function handleToggleFaceId(nextValue) {
+    if (!pin) {
+      Alert.alert('Set a PIN first', 'Biometric unlock needs a PIN as the fallback.');
+      return;
+    }
+    if (!nextValue) {
+      await onSaveFaceIdEnabled(false);
+      showToast && showToast(`${biometricLabel} off`);
+      return;
+    }
+    // Re-check support at the moment of the tap (in case the user changed
+    // their device biometrics since the screen mounted, or our initial
+    // detection raced).
+    try {
+      const hasHw = await LocalAuthentication.hasHardwareAsync();
+      const enrolled = await LocalAuthentication.isEnrolledAsync();
+      if (!hasHw) {
+        Alert.alert(
+          `${biometricLabel} unavailable`,
+          'This device does not have biometric hardware.',
+        );
+        return;
+      }
+      if (!enrolled) {
+        Alert.alert(
+          `${biometricLabel} not set up`,
+          `Add ${biometricLabel} in your device Settings, then try again.`,
+        );
+        return;
+      }
+    } catch (e) {
+      Alert.alert('Could not check biometrics', e.message || 'Try again.');
+      return;
+    }
+    // Verify the user is actually the device owner before enabling, so a
+    // bystander with the unlocked phone can't silently enroll themselves.
+    try {
+      const result = await LocalAuthentication.authenticateAsync({
+        promptMessage: `Enable ${biometricLabel} for Veery`,
+        disableDeviceFallback: true,
+      });
+      if (!result.success) {
+        // The most common failure here in dev is Expo Go: it ignores the
+        // NSFaceIDUsageDescription in our app.json (uses its own bundle id),
+        // so authenticateAsync returns error: 'missing_usage_description'.
+        // In a production / dev-client build this branch only fires on
+        // genuine user cancel or auth failure and we stay silent.
+        if (result.error === 'missing_usage_description') {
+          Alert.alert(
+            `${biometricLabel} needs a dev build`,
+            'Expo Go cannot prompt for Face ID. This works in EAS dev clients and in App Store builds.',
+          );
+        }
+        return;
+      }
+      await onSaveFaceIdEnabled(true);
+      showToast && showToast(`${biometricLabel} on`);
+    } catch (_) {
+      Alert.alert('Could not enable', `Something went wrong verifying ${biometricLabel}.`);
+    }
+  }
 
   function saveProfile() {
     onSaveDisplayName(name);
@@ -226,6 +319,46 @@ export default function SecurityScreen({
               )}
             </View>
           )}
+
+          {/* Face ID / Touch ID. Requires a PIN to be set (PIN is the
+              fallback when biometrics fail or aren't enrolled) and the
+              device must actually support biometrics.
+
+              We make the whole row a TouchableOpacity instead of relying
+              on the embedded Toggle's Pressable — gives a bigger hit
+              target and avoids a flaky-touch issue we saw on iOS. */}
+          <TouchableOpacity
+            onPress={() => handleToggleFaceId(!faceIdEnabled)}
+            activeOpacity={0.7}
+            style={{
+              marginTop: 16,
+              padding: 14,
+              backgroundColor: theme.bg2,
+              borderWidth: 1,
+              borderColor: theme.brd,
+              borderRadius: 14,
+              flexDirection: 'row',
+              alignItems: 'center',
+              gap: 12,
+              opacity: pin && biometricAvailable ? 1 : 0.5,
+            }}
+          >
+            <View style={{ flex: 1 }}>
+              <Text style={{ color: theme.t1, fontSize: 14, fontWeight: '600' }}>
+                Unlock with {biometricLabel}
+              </Text>
+              <Text style={{ color: theme.t5, fontSize: 11, marginTop: 2 }}>
+                {!pin
+                  ? 'Set a PIN first to enable biometric unlock.'
+                  : !biometricAvailable
+                    ? `${biometricLabel} is not available on this device.`
+                    : `Use ${biometricLabel} instead of your PIN. PIN still works as a fallback.`}
+              </Text>
+            </View>
+            <View pointerEvents="none">
+              <Toggle value={!!faceIdEnabled} onValueChange={() => {}} />
+            </View>
+          </TouchableOpacity>
         </Section>
       </ScrollView>
     </View>
