@@ -12,6 +12,7 @@ import {
   TouchableOpacity,
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import * as SecureStore from 'expo-secure-store';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { StatusBar } from 'expo-status-bar';
@@ -30,6 +31,8 @@ import ContactForm from './src/components/ContactForm';
 import PaywallModal from './src/components/PaywallModal';
 import TrialBanner from './src/components/TrialBanner';
 import { createCheckoutSession, createPortalSession } from './src/lib/stripeApi';
+import { migrateInsecureStorage } from './src/lib/secureMigration';
+import { supabase } from './src/lib/supabase';
 
 import ContactsScreen from './src/screens/ContactsScreen';
 import DetailScreen from './src/screens/DetailScreen';
@@ -1319,6 +1322,7 @@ function AiFillPromptModal({ visible, theme, attendeeName, onYes, onNo, onCancel
 
 export default function App() {
   const [fontsLoaded, setFontsLoaded] = useState(false);
+  const [migrationDone, setMigrationDone] = useState(false);
 
   useEffect(() => {
     (async () => {
@@ -1340,7 +1344,33 @@ export default function App() {
     })();
   }, []);
 
-  if (!fontsLoaded) {
+  // Migrate insecure AsyncStorage state (Supabase session, PIN, password
+  // mirror) to SecureStore on cold start. Failure is non-fatal: the secure
+  // storage adapter falls back to AsyncStorage so the user stays signed in,
+  // and the migration retries on next launch (flag isn't set on error).
+  useEffect(() => {
+    (async () => {
+      const result = await migrateInsecureStorage();
+      if (result.status === 'error') {
+        console.warn(
+          '[secureMigration] failed; will retry next launch:',
+          result.error?.message,
+        );
+      }
+      setMigrationDone(true);
+    })();
+  }, []);
+
+  // Dev-only: expose key modules on globalThis so the in-app debugger
+  // console can poke at storage and auth without require().
+  // Stripped from release builds by the __DEV__ guard.
+  useEffect(() => {
+    if (__DEV__) {
+      globalThis.__debug = { AsyncStorage, SecureStore, supabase };
+    }
+  }, []);
+
+  if (!fontsLoaded || !migrationDone) {
     return (
       <View
         style={{

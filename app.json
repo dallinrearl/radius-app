@@ -6,12 +6,17 @@
     "scheme": "veery",
     "orientation": "portrait",
     "userInterfaceStyle": "automatic",
+    "icon": "./assets/icons/ios-light.png",
     "assetBundlePatterns": [
       "**/*"
     ],
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.veery.app",
+      "icon": {
+        "light": "./assets/icons/ios-light.png",
+        "dark": "./assets/icons/ios-dark.png"
+      },
       "infoPlist": {
         "NSCameraUsageDescription": "Veery uses the camera to scan business cards and QR codes.",
         "NSMicrophoneUsageDescription": "Veery uses the microphone to record voice notes for new contacts.",

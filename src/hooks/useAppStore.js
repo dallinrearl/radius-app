@@ -97,6 +97,11 @@ export function useAppStore() {
     })();
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
       setUserId(session?.user?.id || null);
+      // Fresh sign-in on a new device picks up the account-bound onboarded
+      // flag from user_metadata so the user doesn't re-onboard.
+      if (session?.user?.user_metadata?.onboarded === true) {
+        setOnboarded(true);
+      }
     });
     return () => {
       mounted = false;
@@ -156,12 +161,6 @@ export function useAppStore() {
 
   useEffect(() => {
     (async () => {
-      try {
-        const r = await storage.get('crm-onboarded');
-        setOnboarded(r?.value === 'true');
-      } catch (_) {
-        setOnboarded(false);
-      }
       let loadedMyCard = null;
       try {
         const r = await storage.get('crm-mycard');
@@ -280,6 +279,34 @@ export function useAppStore() {
 
         setReviewQueue(parsed);
       } catch (_) {}
+
+      // Resolve onboarded from user_metadata (source of truth for the
+      // account), falling back to the legacy AsyncStorage flag for users
+      // who onboarded before this signal moved server-side. Backfill the
+      // metadata from the legacy flag so this is the last install that
+      // has to consult AsyncStorage.
+      try {
+        const { data: { session } } = await supabase.auth.getSession();
+        if (session?.user?.user_metadata?.onboarded === true) {
+          setOnboarded(true);
+        } else {
+          const legacyR = await storage.get('crm-onboarded');
+          const legacyTrue = legacyR?.value === 'true';
+          setOnboarded(legacyTrue);
+          if (legacyTrue && session?.user) {
+            try {
+              await supabase.auth.updateUser({ data: { onboarded: true } });
+            } catch (_) {}
+          }
+        }
+      } catch (_) {
+        try {
+          const legacyR = await storage.get('crm-onboarded');
+          setOnboarded(legacyR?.value === 'true');
+        } catch (_) {
+          setOnboarded(false);
+        }
+      }
 
       setLoaded(true);
     })();
@@ -660,6 +687,11 @@ export function useAppStore() {
       }
       setOnboarded(true);
       try {
+        await supabase.auth.updateUser({ data: { onboarded: true } });
+      } catch (e) {
+        console.warn('finishOnboarding: metadata write failed:', e?.message);
+      }
+      try {
         await storage.set('crm-onboarded', 'true');
       } catch (_) {}
     },
@@ -675,6 +707,9 @@ export function useAppStore() {
 
   const resetOnboarding = async () => {
     setOnboarded(false);
+    try {
+      await supabase.auth.updateUser({ data: { onboarded: false } });
+    } catch (_) {}
     try {
       await storage.set('crm-onboarded', 'false');
     } catch (_) {}
