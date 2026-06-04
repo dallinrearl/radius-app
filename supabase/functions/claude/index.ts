@@ -11,6 +11,8 @@
 // tool_input is the parsed `input` of the first tool_use block, when
 // the client forces structured output via tools/tool_choice.
 
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+
 const ANTHROPIC_URL = 'https://api.anthropic.com/v1/messages';
 const DEFAULT_MODEL = 'claude-sonnet-4-6';
 const DEFAULT_MAX_TOKENS = 1024;
@@ -54,6 +56,58 @@ Deno.serve(async (req) => {
   const prompt = (body.prompt || '').trim();
   if (!prompt) {
     return json({ error: 'Missing prompt' }, 400);
+  }
+
+  // ---- Authn + per-user quota enforcement ----
+  // `verify_jwt = true` (config.toml) means the platform already rejected any
+  // request without a valid JWT before we got here. We still resolve the user
+  // to enforce the per-tier monthly AI quota SERVER-side -- the client-side
+  // counter is advisory and trivially bypassed by calling this function directly.
+  const supabaseUrl = Deno.env.get('SUPABASE_URL');
+  const anonKey = Deno.env.get('SUPABASE_ANON_KEY');
+  const serviceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
+  if (!supabaseUrl || !anonKey || !serviceKey) {
+    return json({ error: 'Server misconfigured: missing Supabase env vars' }, 500);
+  }
+
+  const authHeader = req.headers.get('Authorization') || '';
+  if (!authHeader.toLowerCase().startsWith('bearer ')) {
+    return json({ error: 'Missing or malformed Authorization header' }, 401);
+  }
+
+  // Resolve caller from their JWT.
+  const userClient = createClient(supabaseUrl, anonKey, {
+    global: { headers: { Authorization: authHeader } },
+  });
+  const { data: userData, error: userErr } = await userClient.auth.getUser();
+  if (userErr || !userData?.user?.id) {
+    return json({ error: 'Could not resolve user from token' }, 401);
+  }
+  const userId = userData.user.id;
+
+  // Atomically check + consume one AI call against the user's tier quota.
+  const admin = createClient(supabaseUrl, serviceKey);
+  const { data: quota, error: quotaErr } = await admin.rpc('consume_ai_call', {
+    p_user_id: userId,
+  });
+  if (quotaErr) {
+    console.error('consume_ai_call failed:', quotaErr);
+    return json({ error: 'Quota check failed' }, 500);
+  }
+  if (!quota?.allowed) {
+    // 429 so the client can surface the paywall rather than a generic error.
+    return json(
+      {
+        error:
+          quota?.reason === 'limit_reached'
+            ? 'Monthly AI limit reached for your plan.'
+            : 'AI call not permitted.',
+        reason: quota?.reason || 'not_allowed',
+        limit: quota?.limit,
+        count: quota?.count,
+      },
+      429,
+    );
   }
 
   const system = body.system?.trim() || undefined;
